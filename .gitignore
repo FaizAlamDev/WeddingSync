@@ -1,0 +1,42 @@
+# ─── dependencies ───────────────────────────────────────────────────
+node_modules/
+
+# ─── Expo ───────────────────────────────────────────────────────────
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# ─── generated native folders (we build via EAS, never locally) ────
+/app/ios/
+/app/android/
+
+# ─── secrets ────────────────────────────────────────────────────────
+# The Supabase anon/publishable key is designed to be public (RLS is what
+# protects the data), but .env also holds anything else you add later, so
+# keep the whole file out of version control.
+.env
+.env.*
+!.env.example
+
+# ─── Metro ──────────────────────────────────────────────────────────
+.metro-health-check*
+*.tsbuildinfo
+
+# ─── debug ──────────────────────────────────────────────────────────
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# ─── OS ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── Android signing (never commit) ─────────────────────────────────
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*

@@ -1,0 +1,175 @@
+-- =====================================================================
+-- LOCAL BEHAVIOUR TEST — DO NOT RUN ON SUPABASE.
+-- =====================================================================
+-- Location: supabase/tests/07_behaviour.sql
+--
+-- Validates that the audit triggers actually fire, that no-op updates
+-- stay silent, that hard deletes are rejected for clients, and that
+-- overlapping events do NOT triple-count headcount.
+--
+-- Expects 001-006 applied to an EMPTY database (this file inserts rows).
+-- Run after tests/00_stub.sql + 001 -> 002 -> 003 -> 004 -> 005.
+--
+-- Sections:
+--   A  audit trail, correct actors and before/after diffs
+--   B  hard delete rejected as the `authenticated` role (EXPECTED error)
+--   C  no-op update wrote nothing
+--   D  per-event counts
+--   E  rollup counts each family once, not once per event
+--   F  typo-tolerant search, true and false positives
+--   G  soft-deleted rows vanish from search and counts
+--   H  card_progress
+--   I  activity_feed joins resolve names
+--   J  remove + re-add to an event does not collide
+-- =====================================================================
+
+\set ON_ERROR_STOP on
+
+-- ── setup: a signed-in device ───────────────────────────────────────
+insert into auth.users (id) values
+  ('11111111-1111-1111-1111-111111111111'),
+  ('22222222-2222-2222-2222-222222222222');
+select set_config('request.jwt.claim.sub',
+  '11111111-1111-1111-1111-111111111111', false);
+
+insert into profiles (id, display_name) values
+  ('11111111-1111-1111-1111-111111111111', 'Faiz'),
+  ('22222222-2222-2222-2222-222222222222', 'Ammi');
+
+\echo '--- 1. create a family ---'
+insert into guests (name, phone, male_count, female_count)
+values ('Raza Family', '03001234567', 3, 2);
+
+\echo '--- 2. attend all three events ---'
+insert into guest_events (guest_id, event_id)
+select (select id from guests where name = 'Raza Family'), id from events;
+
+\echo '--- 3. card sent for Faiz Baraat only ---'
+update guest_events set card_sent = true, card_sent_at = now(), card_sent_by = 'Faiz'
+where event_id = (select id from events where name = 'Faiz Baraat')
+  and guest_id = (select id from guests where name = 'Raza Family');
+
+\echo '--- 4. edit the phone number ---'
+update guests set phone = '03009998888' where name = 'Raza Family';
+
+\echo '--- 5. a NO-OP update must NOT write a log row ---'
+update guests set phone = '03009998888' where name = 'Raza Family';
+
+\echo '--- 6. a family with no counts recorded ---'
+insert into guests (name) values ('Uncounted Friends');
+
+\echo '--- 7. todo lifecycle ---'
+insert into todos (title, category, assigned_to) values ('Order mehndi trays', 'Mehndi', 'Ammi');
+update todos set status = 'done', completed_at = now(), completed_by = 'Faiz'
+ where title = 'Order mehndi trays';
+update todos set status = 'open' where title = 'Order mehndi trays';
+
+\echo '--- 8. soft delete a family ---'
+update guests set deleted_at = now() where name = 'Uncounted Friends';
+
+\echo '--- 9. switch actor mid-session, then another action ---'
+select set_config('request.jwt.claim.sub',
+  '22222222-2222-2222-2222-222222222222', false);
+update guest_events set card_sent = true, card_sent_at = now(), card_sent_by = 'Ammi'
+where event_id = (select id from events where name = 'Walima')
+  and guest_id = (select id from guests where name = 'Raza Family');
+
+\echo '=== A. audit trail (expect exactly 12 rows) ==='
+select actor_name, entity_type, action, changes from activity_log order by id;
+
+\echo '=== B. hard delete as an app client must be REJECTED ==='
+\echo '    (the ERROR line below is the EXPECTED outcome, not a failure)'
+-- statement 1 deliberately provokes a permission error, so psql must not
+-- abort on it; re-enable strict mode immediately afterwards.
+\set ON_ERROR_STOP off
+set role authenticated;
+delete from guests where name = 'Raza Family';
+reset role;
+\set ON_ERROR_STOP on
+\echo '    row still present:'
+select count(*) as raza_still_there from guests where name = 'Raza Family';
+
+\echo '=== C. no-op update wrote nothing (expect 12 rows) ==='
+select count(*) as log_rows from activity_log;
+
+\echo '=== D. per-event counts: 5 each, 1 card sent on Faiz, 1 on Walima ==='
+select name, men, women, total, families, uncounted, cards_sent
+  from event_counts order by sort_order;
+
+\echo '=== E. rollup counts the family ONCE (expect 5, NOT 15) ==='
+select families, men, women, total, uncounted from guest_rollup;
+
+\echo '=== F. typo-tolerant search: "rza" -> Raza Family ==='
+select name, male_count, female_count from search_guests('rza');
+
+\echo '=== F2. must NOT match an unrelated family ==='
+select count(*) as false_positives from search_guests('khan');
+
+\echo '=== G. soft-deleted family is gone from search and counts ==='
+select count(*) as should_be_0 from search_guests('uncounted');
+
+\echo '=== H. card_progress ==='
+select * from card_progress order by event_name;
+
+\echo '=== I. activity feed with resolved names ==='
+select id, actor_name, entity_type, action, guest_name, todo_title
+  from activity_feed order by id;
+
+\echo '=== J. re-adding to a tombstoned event must not collide ==='
+do $$
+declare v_id uuid; v_ev uuid := (select id from events where name = 'Moiz Baraat');
+  v_g uuid := (select id from guests where name = 'Raza Family');
+begin
+  select id into v_id from guest_events
+   where guest_id = v_g and event_id = v_ev and deleted_at is null;
+  update guest_events set deleted_at = now() where id = v_id;
+  insert into guest_events (guest_id, event_id) values (v_g, v_ev);
+  raise notice 'ok: remove + re-add produced a fresh row';
+end $$;
+
+select count(*) as active_rows_for_raza
+  from guest_events where guest_id = (select id from guests where name='Raza Family')
+    and deleted_at is null;
+
+-- ── everything above ran as superuser, which bypasses BOTH grants and
+--    RLS. Sections K and L re-run the real client flows as `authenticated`
+--    so that missing grants and wrong policies actually surface.
+
+\echo '=== K. name picker as a real client (authenticated) ==='
+insert into auth.users (id) values ('33333333-3333-3333-3333-333333333333');
+select set_config('request.jwt.claim.sub',
+  '33333333-3333-3333-3333-333333333333', false);
+
+\set ON_ERROR_STOP on
+set role authenticated;
+
+\echo '    writing my own profile row (must succeed):'
+insert into profiles (id, display_name)
+  values ('33333333-3333-3333-3333-333333333333', 'Moiz');
+
+\echo '    writing SOMEONE ELSE''s row (ERROR below is EXPECTED):'
+\set ON_ERROR_STOP off
+insert into profiles (id, display_name)
+  values ('22222222-2222-2222-2222-222222222222', 'Impostor');
+\set ON_ERROR_STOP on
+reset role;
+
+select
+  (select count(*) from profiles where display_name = 'Moiz')      as own_row_written,
+  (select count(*) from profiles where display_name = 'Impostor') as forged_rows;
+
+\echo '=== L. guest writes as a real client ==='
+\set ON_ERROR_STOP on
+set role authenticated;
+insert into guests (name, phone, male_count, female_count)
+  values ('Kareem Family', '03111222333', 2, 4);
+update guest_events set card_sent = true, card_sent_at = now(), card_sent_by = 'Moiz'
+ where guest_id = (select id from guests where name = 'Kareem Family')
+   and event_id = (select id from events where name = 'Moiz Baraat');
+reset role;
+\set ON_ERROR_STOP on
+
+select count(*) as kareem_added from guests where name = 'Kareem Family';
+select actor_name, action from activity_log order by id desc limit 2;
+
+\echo '--- expected: own_row_written=1, forged_rows=0, kareem_added=1 ---'

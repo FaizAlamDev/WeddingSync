@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "WeddingList",
+    "slug": "weddingList",
+    "scheme": "weddinglist",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-sharing"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.faiz.weddinglist"
+    },
+    "android": {
+      "package": "com.faiz.weddinglist",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#7B2D43",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": []
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "12962bba-bc0e-4c96-af4d-819f859fd86a"
+      }
+    },
+    "owner": "faizalam9883"
+  }
+}
