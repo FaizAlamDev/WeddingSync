@@ -48,7 +48,17 @@ create table if not exists public.guests (
 );
 
 -- ─── guest_events ────────────────────────────────────────────────────
--- Which events a family attends, and card status per event.
+-- Which events a family attends, card status per event, and the
+-- per-event headcount override.
+--
+-- A family sends different numbers to different events: 3 men to the
+-- Baraat, 20 to the Walima -- and which event is the bigger one depends
+-- entirely on whose side of the wedding it is. So every family x event
+-- pair is independent: male_count/female_count here are THAT event's
+-- numbers, null means "same as the family's numbers" (guests row), and 0
+-- is a recorded zero, not "unset". Nothing is inherited from one event
+-- to another, and nothing assumes a direction.
+--
 -- A family in both baraats gets two independent card checkboxes.
 create table if not exists public.guest_events (
   id           uuid primary key default gen_random_uuid(),
@@ -57,9 +67,13 @@ create table if not exists public.guest_events (
   card_sent    boolean not null default false,
   card_sent_at timestamptz,
   card_sent_by text,                          -- display name, denormalized
+  male_count   integer,                       -- null = use the family count
+  female_count integer,
   deleted_at   timestamptz,
   created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  updated_at   timestamptz not null default now(),
+  constraint guest_events_male_nonneg   check (male_count   is null or male_count   >= 0),
+  constraint guest_events_female_nonneg check (female_count is null or female_count >= 0)
 );
 
 -- partial unique: remove a family from an event and re-add later creates a

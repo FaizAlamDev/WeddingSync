@@ -3,6 +3,8 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 
 const DB_NAME = 'weddingsync.db';
 
+const SCHEMA_VERSION = 2;
+
 let dbPromise: Promise<SQLiteDatabase> | null = null;
 
 async function openDatabase(): Promise<SQLiteDatabase> {
@@ -10,7 +12,37 @@ async function openDatabase(): Promise<SQLiteDatabase> {
   await database.execAsync(SCHEMA_VERSION_1);
   await database.execAsync(SCHEMA_OUTBOX);
   await database.execAsync(SCHEMA_SYNC_STATE);
+  await migrate(database);
   return database;
+}
+
+async function migrate(database: SQLiteDatabase): Promise<void> {
+  const row = await database.getFirstAsync<{ user_version: number }>(
+    'PRAGMA user_version'
+  );
+  const version = row?.user_version ?? 0;
+
+  if (version < 2) {
+    await addColumn(database, 'guest_events', 'male_count INTEGER');
+    await addColumn(database, 'guest_events', 'female_count INTEGER');
+  }
+
+  if (version < SCHEMA_VERSION) {
+    await database.execAsync(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+}
+
+async function addColumn(
+  database: SQLiteDatabase,
+  table: string,
+  definition: string
+): Promise<void> {
+  try {
+    await database.execAsync(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('duplicate column')) throw error;
+  }
 }
 
 export async function getDb(): Promise<SQLiteDatabase> {
@@ -75,11 +107,15 @@ CREATE TABLE IF NOT EXISTS guests (
 CREATE INDEX IF NOT EXISTS idx_guests_updated ON guests (updated_at);
 CREATE INDEX IF NOT EXISTS idx_guests_deleted ON guests (deleted_at);
 
--- Attendance + per-event card status.
+-- Attendance + per-event card status + per-event headcount override.
+-- male_count / female_count here are THAT event's numbers; null means
+-- "same as the family" (guests row), 0 is a recorded zero.
 CREATE TABLE IF NOT EXISTS guest_events (
   id            TEXT PRIMARY KEY NOT NULL,
   guest_id      TEXT NOT NULL,
   event_id      TEXT NOT NULL,
+  male_count    INTEGER,
+  female_count  INTEGER,
   card_sent     INTEGER NOT NULL DEFAULT 0,
   card_sent_at  TEXT,
   card_sent_by  TEXT,

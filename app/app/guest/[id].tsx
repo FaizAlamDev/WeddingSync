@@ -12,16 +12,20 @@ import {
 import { Stack, useLocalSearchParams, useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { PrimaryButton, Banner } from '../../src/components/ui';
+import { PrimaryButton, Banner, Stepper } from '../../src/components/ui';
 import { getDb } from '../../src/db/local';
 import { getGuest, listEvents, type GuestRow, type EventRow } from '../../src/db/queries';
-import { setCard, removeFamily, dialableNumber } from '../../src/db/actions';
+import { setCard, setEventCounts, removeFamily, dialableNumber } from '../../src/db/actions';
 import { describeCounts } from '../../src/format';
 import { colors, fontSize, spacing, radius, borderWidth } from '../../src/theme';
 
-interface CardState {
+interface LinkState {
   cardSent: boolean;
+  maleCount: number | null;
+  femaleCount: number | null;
 }
+
+const EMPTY_LINK: LinkState = { cardSent: false, maleCount: null, femaleCount: null };
 
 export default function GuestDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -30,18 +34,29 @@ export default function GuestDetailScreen() {
 
   const [guest, setGuest] = useState<GuestRow | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
-  const [cards, setCards] = useState<Record<string, CardState>>({});
+  const [links, setLinks] = useState<Record<string, LinkState>>({});
   const [loading, setLoading] = useState(true);
   const [writeError, setWriteError] = useState<string | null>(null);
+
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState<{ men: number | null; women: number | null } | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
     const db = await getDb();
-    const [g, evs, links] = await Promise.all([
+    const [g, evs, rows] = await Promise.all([
       getGuest(id),
       listEvents(),
-      db.getAllAsync<{ event_id: string; card_sent: number }>(
-        'SELECT event_id, card_sent FROM guest_events WHERE guest_id = ? AND deleted_at IS NULL',
+      db.getAllAsync<{
+        event_id: string;
+        card_sent: number;
+        male_count: number | null;
+        female_count: number | null;
+      }>(
+        `SELECT event_id, card_sent, male_count, female_count
+           FROM guest_events
+          WHERE guest_id = ? AND deleted_at IS NULL`,
         id
       ),
     ]);
@@ -49,10 +64,16 @@ export default function GuestDetailScreen() {
     setGuest(g);
     setEvents(evs);
 
-    const next: Record<string, CardState> = {};
-    for (const e of evs) next[e.id] = { cardSent: false };
-    for (const l of links) next[l.event_id] = { cardSent: l.card_sent === 1 };
-    setCards(next);
+    const next: Record<string, LinkState> = {};
+    for (const e of evs) next[e.id] = { ...EMPTY_LINK };
+    for (const r of rows) {
+      next[r.event_id] = {
+        cardSent: r.card_sent === 1,
+        maleCount: r.male_count,
+        femaleCount: r.female_count,
+      };
+    }
+    setLinks(next);
     setLoading(false);
   }, [id]);
 
@@ -64,18 +85,67 @@ export default function GuestDetailScreen() {
 
   async function toggleCard(eventId: string) {
     if (!id) return;
-    const current = cards[eventId]?.cardSent ?? false;
+    const current = links[eventId]?.cardSent ?? false;
     const next = !current;
 
     // Optimistic: the box moves immediately, then the outbox catches up.
     setWriteError(null);
-    setCards((prev) => ({ ...prev, [eventId]: { cardSent: next } }));
+    setLinks((prev) => ({
+      ...prev,
+      [eventId]: { ...(prev[eventId] ?? EMPTY_LINK), cardSent: next },
+    }));
 
     try {
       await setCard(id, eventId, next);
     } catch (e) {
-      setCards((prev) => ({ ...prev, [eventId]: { cardSent: current } }));
+      setLinks((prev) => ({
+        ...prev,
+        [eventId]: { ...(prev[eventId] ?? EMPTY_LINK), cardSent: current },
+      }));
       setWriteError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function openEditor(eventId: string, men: number | null, women: number | null) {
+    setDraft({ men, women });
+    setEditing(eventId);
+  }
+
+  async function saveCounts(eventId: string) {
+    if (!guest || !draft) return;
+    const men = draft.men === guest.male_count ? null : draft.men;
+    const women = draft.women === guest.female_count ? null : draft.women;
+    await writeCounts(eventId, men, women);
+  }
+
+  async function useFamilyNumbers(eventId: string) {
+    await writeCounts(eventId, null, null);
+  }
+
+  async function writeCounts(
+    eventId: string,
+    men: number | null,
+    women: number | null
+  ) {
+    if (!guest) return;
+    const previous = links[eventId] ?? EMPTY_LINK;
+
+    setWriteError(null);
+    setSaving(true);
+    setLinks((prev) => ({
+      ...prev,
+      [eventId]: { ...previous, maleCount: men, femaleCount: women },
+    }));
+    setEditing(null);
+    setDraft(null);
+
+    try {
+      await setEventCounts(guest.id, eventId, men, women);
+    } catch (e) {
+      setLinks((prev) => ({ ...prev, [eventId]: previous }));
+      setWriteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -173,35 +243,103 @@ export default function GuestDetailScreen() {
         </View>
       )}
 
-      <Text style={styles.sectionTitle}>Invitation cards</Text>
+      <Text style={styles.sectionTitle}>Invitations</Text>
       {events.length === 0 ? (
         <Text style={styles.muted}>No events yet</Text>
       ) : (
         events.map((e) => {
-          const state = cards[e.id]?.cardSent ?? false;
+          const link = links[e.id];
+          const cardSent = link?.cardSent ?? false;
+          const men = link?.maleCount ?? guest.male_count;
+          const women = link?.femaleCount ?? guest.female_count;
+          const ownNumbers =
+            link !== undefined &&
+            (link.maleCount !== null || link.femaleCount !== null);
+          const open = editing === e.id;
+
           return (
-            <Pressable
-              key={e.id}
-              onPress={() => toggleCard(e.id)}
-              accessibilityRole="checkbox"
-              accessibilityState={{ checked: state }}
-              accessibilityLabel={`Card sent for ${e.name}`}
-              style={({ pressed }) => [
-                styles.cardRow,
-                state && styles.cardRowDone,
-                pressed && styles.cardRowPressed,
-              ]}
-            >
-              <View style={[styles.checkbox, state && styles.checkboxOn]}>
-                {state ? <Text style={styles.checkmark}>✓</Text> : null}
-              </View>
-              <View style={styles.cardText}>
-                <Text style={styles.cardName}>{e.name}</Text>
-                <Text style={styles.cardStatus}>
-                  {state ? 'Card sent' : 'Card not sent'}
+            <View key={e.id} style={styles.eventBlock}>
+              <Pressable
+                onPress={() => toggleCard(e.id)}
+                accessibilityRole="checkbox"
+                accessibilityState={{ checked: cardSent }}
+                accessibilityLabel={`Card sent for ${e.name}`}
+                style={({ pressed }) => [
+                  styles.cardRow,
+                  cardSent && styles.cardRowDone,
+                  pressed && styles.cardRowPressed,
+                ]}
+              >
+                <View style={[styles.checkbox, cardSent && styles.checkboxOn]}>
+                  {cardSent ? <Text style={styles.checkmark}>✓</Text> : null}
+                </View>
+                <View style={styles.cardText}>
+                  <Text style={styles.cardName}>{e.name}</Text>
+                  <Text style={styles.cardStatus}>
+                    {cardSent ? 'Card sent' : 'Card not sent'}
+                  </Text>
+                </View>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  if (open) {
+                    setEditing(null);
+                    setDraft(null);
+                  } else {
+                    openEditor(e.id, men, women);
+                  }
+                }}
+                accessibilityRole="button"
+                accessibilityLabel={`Numbers for ${e.name}: ${describeCounts(men, women)}. ${open ? 'Close' : 'Change'}`}
+                style={({ pressed }) => [
+                  styles.countsRow,
+                  open && styles.countsRowOpen,
+                  pressed && styles.countsRowPressed,
+                ]}
+              >
+                <Text
+                  style={[styles.countsValue, ownNumbers && styles.countsValueOwn]}
+                  numberOfLines={1}
+                >
+                  {describeCounts(men, women)}
                 </Text>
-              </View>
-            </Pressable>
+                <Text style={styles.countsAction}>{open ? 'Close' : 'Change'}</Text>
+              </Pressable>
+
+              {open && draft ? (
+                <View style={styles.editor}>
+                  <Stepper
+                    label="Men"
+                    value={draft.men}
+                    onChange={(v) => setDraft((d) => (d ? { ...d, men: v } : d))}
+                  />
+                  <Stepper
+                    label="Women"
+                    value={draft.women}
+                    onChange={(v) => setDraft((d) => (d ? { ...d, women: v } : d))}
+                  />
+                  <PrimaryButton
+                    label="Save numbers"
+                    busy={saving}
+                    onPress={() => void saveCounts(e.id)}
+                  />
+                  {ownNumbers ? (
+                    <Pressable
+                      onPress={() => void useFamilyNumbers(e.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Use the family's numbers for ${e.name}`}
+                      style={({ pressed }) => [
+                        styles.resetButton,
+                        pressed && styles.resetButtonPressed,
+                      ]}
+                    >
+                      <Text style={styles.resetText}>Use family numbers</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
           );
         })
       )}
@@ -275,13 +413,15 @@ const styles = StyleSheet.create({
   },
   muted: { fontSize: fontSize.body, color: colors.textMuted },
 
+  eventBlock: { marginBottom: spacing.lg },
+
   cardRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
     minHeight: 72,
     paddingHorizontal: spacing.md,
-    marginBottom: spacing.sm,
+    marginBottom: spacing.xs,
     borderRadius: radius.md,
     borderWidth: borderWidth.hairline,
     borderColor: colors.border,
@@ -308,6 +448,44 @@ const styles = StyleSheet.create({
   cardText: { flex: 1 },
   cardName: { fontSize: fontSize.lg, fontWeight: '700', color: colors.text },
   cardStatus: { fontSize: fontSize.sm, color: colors.textMuted, marginTop: 2 },
+
+  countsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    minHeight: 56,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: borderWidth.hairline,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  countsRowOpen: { borderColor: colors.primary },
+  countsRowPressed: { opacity: 0.85 },
+  countsValue: { flex: 1, fontSize: fontSize.body, fontWeight: '600', color: colors.textMuted },
+  countsValueOwn: { color: colors.primary, fontWeight: '700' },
+  countsAction: { fontSize: fontSize.sm, fontWeight: '700', color: colors.primary },
+
+  editor: {
+    marginTop: spacing.sm,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: borderWidth.hairline,
+    borderColor: colors.primary,
+    backgroundColor: colors.surface,
+    gap: spacing.md,
+  },
+  resetButton: {
+    minHeight: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.md,
+    borderWidth: borderWidth.hairline,
+    borderColor: colors.primary,
+    backgroundColor: colors.surface,
+  },
+  resetButtonPressed: { backgroundColor: colors.primarySoft },
+  resetText: { fontSize: fontSize.body, fontWeight: '700', color: colors.primary },
 
   actions: { marginTop: spacing.xxl },
   actionGap: { height: spacing.md },

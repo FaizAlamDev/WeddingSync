@@ -27,9 +27,9 @@ export const supabaseAnonKey = rawKey.trim();
 export const isConfigured = !isPlaceholder(supabaseUrl) && !isPlaceholder(supabaseAnonKey);
 
 /**
- * Family members who may pick a name. Kept in sync with the
- * `family_members` table; this list is the offline fallback so the picker
- * renders with no connectivity. See 007_family_members.sql.
+ * Family members who may pick a name, from a comma-separated env var so
+ * the picker renders with no connectivity. The name someone actually
+ * claims is stored against their anonymous id in the `profiles` table.
  */
 export const familyMembers: string[] = String(process.env.EXPO_PUBLIC_FAMILY_MEMBERS ?? '')
   .split(',')

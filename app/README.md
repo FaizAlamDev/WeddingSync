@@ -95,8 +95,8 @@ The family list leaves the phone in two shapes, both built from SQLite, so
 both work with no signal:
 
 - **Excel (`.xlsx`)** — one sheet per event, named after it: that event's
-  families with their men, women and total counts, and a bold `TOTAL` row
-  for the sheet. Families nobody has put on an event yet get a last sheet
+  families with the numbers that apply to that event — the event's own
+  where set, otherwise the family's — and a bold `TOTAL` row for the sheet. Families nobody has put on an event yet get a last sheet
   of their own. Handed to `expo-sharing`, so it can go to Drive, WhatsApp
   or mail.
 - **Print (A4)** — the same lists for the phone's print dialog
@@ -128,6 +128,7 @@ Set for the older half of the family, deliberately:
 - minimum tap target 56dp, above the 48dp platform minimum
 - 1dp borders at rest; 2dp only for selected, warning, or deliberately emphasised controls
 - field labels and section headings are set in the brand maroon, so the accent is the same on every screen; grey is reserved for secondary text, never for a label
+- per-event numbers are grey while they follow the family's numbers and switch to maroon the moment that event has its own — no extra wording needed
 - three tabs, never deeper than two screens
 - no swipe gestures, no hidden affordances
 - every destructive action asks first
@@ -246,8 +247,9 @@ All seven screens are implemented and the app compiles:
   counts, search, call button, add-family FAB
 - **Add/edit family** — name, phone, male/female steppers, event multi-select,
   and the duplicate warning
-- **Family detail** — dialler and one checkbox per event; the trail for the
-  family lives on the Activity tab
+- **Family detail** — dialler, one checkbox per event, and per-event numbers
+  edited inline (grey while following the family's, maroon once the event has
+  its own); the trail for the family lives on the Activity tab
 - **Tasks** — Open/Done tabs, category, assignee, overdue marking, and a task
   detail screen with its own trail
 - **Activity** — global feed filterable by cards / families / tasks, with

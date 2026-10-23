@@ -6,35 +6,57 @@
 -- Summing event_counts would triple-count them, so:
 --   event_counts  -> per-event numbers (filter chips)
 --   guest_rollup  -> the union, each family counted ONCE (top bar)
+--
+-- Per-event numbers: a family can send 3 members to one event and 20 to
+-- another. guest_events.male_count / female_count override the family's
+-- numbers for that event alone; null means "same as the family". Both
+-- directions are supported -- no event is assumed to be the bigger one.
 
 -- ─── per-event counts ───────────────────────────────────────────────
 -- One row per event: feeds "Faiz Baraat (180)" chips and the card
 -- progress figure.
 --
--- men/women are NULL when no family in the event has that side recorded.
--- Reporting 0 would claim "no women are coming" for a list whose women
--- were simply never counted; `uncounted` is what makes the gap visible.
+-- Each family's numbers for an event are its OWN override when set, and
+-- the family's numbers otherwise. Which event ends up overridden is up
+-- to whoever knows the family -- the view never assumes that the smaller
+-- event is the Walima, or any other direction.
+--
+-- men/women are NULL when no family in the event has that side recorded
+-- (an override of 0 counts as recorded). Reporting 0 would claim "no
+-- women are coming" for a list whose women were simply never counted;
+-- `uncounted` is what makes the gap visible.
 create or replace view public.event_counts with (security_invoker = true) as
 select
   e.id,
   e.name,
   e.event_date,
   e.sort_order,
-  case when count(g.male_count) = 0 then null
-       else coalesce(sum(g.male_count), 0)::int end            as men,
-  case when count(g.female_count) = 0 then null
-       else coalesce(sum(g.female_count), 0)::int end          as women,
-  coalesce(sum(g.male_count), 0)::int
-    + coalesce(sum(g.female_count), 0)::int                     as total,
-  count(g.id)                                                 as families,
+  case when count(x.men) = 0 then null
+       else coalesce(sum(x.men), 0)::int end                    as men,
+  case when count(x.women) = 0 then null
+       else coalesce(sum(x.women), 0)::int end                  as women,
+  coalesce(sum(x.men), 0)::int
+    + coalesce(sum(x.women), 0)::int                            as total,
+  count(x.guest_id)                                             as families,
   -- families present but not yet counted, surfaced so the summary bar can
   -- say "12 not counted" instead of quietly under-reporting
-  count(g.id) filter (where g.male_count is null
-                       or g.female_count is null)               as uncounted,
-  count(*) filter (where ge.card_sent)                         as cards_sent
+  count(x.guest_id) filter (where x.men is null
+                             or x.women is null)                as uncounted,
+  count(*) filter (where x.card_sent)                           as cards_sent
 from events e
-left join guest_events ge on ge.event_id = e.id and ge.deleted_at is null
-left join guests g on g.id = ge.guest_id and g.deleted_at is null
+left join (
+  -- one row per family attending the event, numbers already resolved.
+  -- The inner join keeps soft-deleted guests out of the sums even when a
+  -- stale override sits on a tombstoned link.
+  select ge.event_id,
+         ge.guest_id,
+         ge.card_sent,
+         coalesce(ge.male_count,   g.male_count)   as men,
+         coalesce(ge.female_count, g.female_count) as women
+  from guest_events ge
+  join guests g on g.id = ge.guest_id and g.deleted_at is null
+  where ge.deleted_at is null
+) x on x.event_id = e.id
 where e.deleted_at is null
 group by e.id, e.name, e.event_date, e.sort_order;
 

@@ -131,13 +131,32 @@ function readChange(changes: string | null, key: string): string | null {
   }
 }
 
+function readCountChange(
+  changes: string | null,
+  key: string
+): { from: number | null; to: number | null } | null {
+  if (!changes) return null;
+  try {
+    const parsed = JSON.parse(changes) as Record<string, unknown>;
+    const v = parsed[key];
+    if (!v || typeof v !== 'object') return null;
+    const pair = v as { from?: unknown; to?: unknown };
+    return {
+      from: typeof pair.from === 'number' ? pair.from : null,
+      to: typeof pair.to === 'number' ? pair.to : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function showCount(value: number | null): string {
+  return value === null ? 'not set' : String(value);
+}
+
 function describe(row: LogRow): string {
   const who = row.actor_name ?? 'Someone';
   const event = readChange(row.changes, 'event');
-  // The trigger stores the family name next to the event for card and
-  // attendance rows; the local join to `guests` covers rows written
-  // before it did. Without this a card line read "Ammi posted the Walima
-  // card" with no clue which family it was for.
   const family = readChange(row.changes, 'guest') ?? row.guest_name;
 
   switch (row.action) {
@@ -145,6 +164,21 @@ function describe(row: LogRow): string {
       return `${who} posted the ${event ?? 'event'} card for ${family ?? 'a family'}`;
     case 'card_uncheck':
       return `${who} unmarked the ${event ?? 'event'} card for ${family ?? 'a family'}`;
+    case 'counts_updated': {
+      const parts: string[] = [];
+      const men = readCountChange(row.changes, 'men');
+      const women = readCountChange(row.changes, 'women');
+      if (men && men.from !== men.to) {
+        parts.push(`men ${showCount(men.from)} → ${showCount(men.to)}`);
+      }
+      if (women && women.from !== women.to) {
+        parts.push(`women ${showCount(women.from)} → ${showCount(women.to)}`);
+      }
+      const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+      return `${who} changed the ${
+        event ?? 'event'
+      } numbers for ${family ?? 'a family'}${detail}`;
+    }
     case 'added_to_event':
       return `${who} added ${family ?? 'a family'} to ${event ?? 'an event'}`;
     case 'removed_from_event':
@@ -178,6 +212,8 @@ function glyph(row: LogRow): string {
       return '✉';
     case 'card_uncheck':
       return '↩';
+    case 'counts_updated':
+      return '👥';
     case 'completed':
       return '✓';
     case 'reopened':

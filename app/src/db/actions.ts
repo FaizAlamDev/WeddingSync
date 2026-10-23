@@ -136,6 +136,59 @@ async function writeCard(
   });
 }
 
+export function setEventCounts(
+  guestId: string,
+  eventId: string,
+  maleCount: number | null,
+  femaleCount: number | null
+): Promise<void> {
+  const key = `${guestId}:${eventId}`;
+  const previous = countWrites.get(key) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(() => writeEventCounts(guestId, eventId, maleCount, femaleCount));
+  countWrites.set(key, next);
+  return next;
+}
+
+const countWrites = new Map<string, Promise<void>>();
+
+async function writeEventCounts(
+  guestId: string,
+  eventId: string,
+  maleCount: number | null,
+  femaleCount: number | null
+): Promise<void> {
+  const db = await getDb();
+
+  const existing = await db.getFirstAsync<{ id: string }>(
+    `SELECT id FROM guest_events
+      WHERE guest_id = ? AND event_id = ? AND deleted_at IS NULL`,
+    guestId,
+    eventId
+  );
+
+  if (existing) {
+    await writeLocal({
+      table: 'guest_events',
+      rowId: existing.id,
+      values: { male_count: maleCount, female_count: femaleCount },
+    });
+    return;
+  }
+
+  await writeLocal({
+    table: 'guest_events',
+    values: {
+      guest_id: guestId,
+      event_id: eventId,
+      card_sent: false,
+      male_count: maleCount,
+      female_count: femaleCount,
+    },
+  });
+}
+
 export interface TodoInput {
   id?: string;
   title: string;

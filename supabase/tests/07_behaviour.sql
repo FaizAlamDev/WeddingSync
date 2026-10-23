@@ -5,21 +5,25 @@
 --
 -- Validates that the audit triggers actually fire, that no-op updates
 -- stay silent, that hard deletes are rejected for clients, and that
--- overlapping events do NOT triple-count headcount.
+-- overlapping events do NOT triple-count headcount. Also covers the
+-- per-event headcount override: setting it, a recorded zero, the
+-- family-number fallback, and clearing it again.
 --
 -- Expects 001-006 applied to an EMPTY database (this file inserts rows).
 -- Run after tests/00_stub.sql + 001 -> 002 -> 003 -> 004 -> 005.
 --
 -- Sections:
 --   A  audit trail, correct actors and before/after diffs
+--   A2 counts_updated carries per-side from/to
 --   B  hard delete rejected as the `authenticated` role (EXPECTED error)
 --   C  no-op update wrote nothing
---   D  per-event counts
+--   D  per-event counts, with an override of 0 women (recorded zero)
 --   E  rollup counts each family once, not once per event
 --   F  typo-tolerant search, true and false positives
 --   G  soft-deleted rows vanish from search and counts
 --   H  card_progress
 --   I  activity_feed joins resolve names
+--   I2 clearing an override returns to the family numbers
 --   J  remove + re-add to an event does not collide
 -- =====================================================================
 
@@ -49,6 +53,13 @@ update guest_events set card_sent = true, card_sent_at = now(), card_sent_by = '
 where event_id = (select id from events where name = 'Faiz Baraat')
   and guest_id = (select id from guests where name = 'Raza Family');
 
+\echo '--- 3b. per-event numbers: only 1 man and 0 women go to Faiz Baraat ---'
+-- Raza's family numbers are 3/2; this event gets its own. Note 0 women
+-- is a RECORDED zero, different from the null "not counted" rule.
+update guest_events set male_count = 1, female_count = 0
+where event_id = (select id from events where name = 'Faiz Baraat')
+  and guest_id = (select id from guests where name = 'Raza Family');
+
 \echo '--- 4. edit the phone number ---'
 update guests set phone = '03009998888' where name = 'Raza Family';
 
@@ -74,8 +85,25 @@ update guest_events set card_sent = true, card_sent_at = now(), card_sent_by = '
 where event_id = (select id from events where name = 'Walima')
   and guest_id = (select id from guests where name = 'Raza Family');
 
-\echo '=== A. audit trail (expect exactly 12 rows) ==='
+\echo '=== A. audit trail (expect exactly 13 rows) ==='
 select actor_name, entity_type, action, changes from activity_log order by id;
+
+\echo '=== A2. the counts_updated row carries per-side from/to ==='
+do $$
+declare v jsonb;
+begin
+  select changes into v from activity_log where action = 'counts_updated';
+  -- from is null: the link had no override, so the event was on the
+  -- family's numbers until this write. to carries the new overrides,
+  -- including a recorded zero.
+  if v->'men'->>'from'    is not null
+     or v->'men'->>'to'    is distinct from '1'
+     or v->'women'->>'from' is not null
+     or v->'women'->>'to'   is distinct from '0' then
+    raise exception 'counts_updated changes are wrong: %', v;
+  end if;
+  raise notice 'ok: counts_updated logged null->1 men, null->0 women (first override)';
+end $$;
 
 \echo '=== B. hard delete as an app client must be REJECTED ==='
 \echo '    (the ERROR line below is the EXPECTED outcome, not a failure)'
@@ -89,10 +117,10 @@ reset role;
 \echo '    row still present:'
 select count(*) as raza_still_there from guests where name = 'Raza Family';
 
-\echo '=== C. no-op update wrote nothing (expect 12 rows) ==='
+\echo '=== C. no-op update wrote nothing (expect 13 rows) ==='
 select count(*) as log_rows from activity_log;
 
-\echo '=== D. per-event counts: 5 each, 1 card sent on Faiz, 1 on Walima ==='
+\echo '=== D. per-event counts: Faiz 1 (1 man, 0 women -- override), Moiz 5, Walima 5 ==='
 select name, men, women, total, families, uncounted, cards_sent
   from event_counts order by sort_order;
 
@@ -114,6 +142,26 @@ select * from card_progress order by event_name;
 \echo '=== I. activity feed with resolved names ==='
 select id, actor_name, entity_type, action, guest_name, todo_title
   from activity_feed order by id;
+
+\echo '=== I2. clearing the override returns the event to the family numbers ==='
+update guest_events set male_count = null, female_count = null
+where event_id = (select id from events where name = 'Faiz Baraat')
+  and guest_id = (select id from guests where name = 'Raza Family');
+
+do $$
+declare v record;
+begin
+  select men, women, total, uncounted into v
+    from event_counts where name = 'Faiz Baraat';
+  if v.men is distinct from 3 or v.women is distinct from 2
+     or v.total is distinct from 5 or v.uncounted is distinct from 0 then
+    raise exception 'clearing the override did not return to the family numbers: %', v;
+  end if;
+  raise notice 'ok: cleared override falls back to 3 men, 2 women';
+end $$;
+
+\echo '    and the clear was logged with from/to:'
+select changes from activity_log where action = 'counts_updated' order by id desc limit 1;
 
 \echo '=== J. re-adding to a tombstoned event must not collide ==='
 do $$

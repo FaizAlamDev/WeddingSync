@@ -27,7 +27,9 @@ the other.
 ## How it works in one paragraph
 
 Families are rows, not people. Phone numbers, male/female counts and event
-attendance live on related tables. Cards are tracked per family *per event*.
+attendance live on related tables. Cards are tracked per family *per event*,
+and so are numbers: an invitation can carry its own men/women headcount,
+blank meaning "same as the family's".
 The device writes to local SQLite first, queues the change in an outbox, and
 flushes when it can. Reads come from the local mirror only. Supabase holds
 the canonical copy, the triggers own the audit trail, and RLS (revoked well
@@ -39,6 +41,7 @@ Excel sheet and to an A4 print page, both built on the phone.
 - No `CALL_PHONE`, `READ_CALL_LOG`, contacts, camera or microphone permissions
 - No password or email — name picker + anonymous Supabase sign-in
 - Headcount is a union, not a sum: overlapping events never triple-count
+- Numbers can differ per event; blank per-event numbers mean "same as the family's"
 - nullable counts mean "not recorded", never zero
 
 ## Ground rules

@@ -171,6 +171,11 @@ update public.guest_events
    set card_sent = true, card_sent_at = now(), card_sent_by = 'Faiz'
  where guest_id = (select id from public.guests where name = 'Permission Family');
 
+update public.guest_events
+   set male_count = 1, female_count = 2
+ where guest_id = (select id from public.guests where name = 'Permission Family')
+   and event_id = (select id from public.events where name = 'Walima');
+
 insert into public.todos (title, category) values ('Check the permission test', 'Admin');
 update public.todos set status = 'done', completed_at = now(), completed_by = 'Faiz'
  where title = 'Check the permission test';
@@ -219,6 +224,20 @@ begin
     raise exception 'expected the card tick to be logged, found %', v_n;
   end if;
   raise notice 'PASS  the card tick is logged with family and event';
+
+  -- The per-event numbers ride the same trigger. from is null here: the
+  -- event was on the family's numbers until this override landed.
+  select count(*) into v_n from public.activity_log
+   where entity_id = v_guest and action = 'counts_updated'
+     and changes->>'event' = 'Walima'
+     and changes->>'guest' = 'Permission Family'
+     and changes->'men'->>'from' is null
+     and changes->'men'->>'to'   = '1'
+     and changes->'women'->>'to' = '2';
+  if v_n <> 1 then
+    raise exception 'expected the per-event numbers change to be logged, found %', v_n;
+  end if;
+  raise notice 'PASS  the per-event numbers change is logged with from/to';
 
   select count(*) into v_n from public.activity_log
    where entity_type = 'todo' and action = 'created'

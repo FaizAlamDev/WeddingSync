@@ -14,7 +14,8 @@ query**) and run them one at a time, in this order:
 | `003_rls.sql` | RLS, grants, policies. **Required — read the notes below.** |
 | `004_views.sql` | `event_counts`, `guest_rollup`, `card_progress`, `activity_feed`, `search_guests()`. |
 | `005_seed.sql` | Faiz Baraat, Moiz Baraat, Walima. Safe to re-run. |
-| `006_verify.sql` | 10 assertions, printed as a PASS/FAIL table. **Read-only.** |
+| `007_event_counts.sql` | Per-event headcount columns + the updated trigger and `event_counts`. Paste this on a database made before it; a no-op on fresh ones. |
+| `006_verify.sql` | 11 assertions, printed as a PASS/FAIL table. **Read-only.** |
 
 Every file is **idempotent** — paste and Run as often as you like.
 
@@ -42,7 +43,8 @@ last.
    1 | PASS             | RLS enabled on all tables        | all public tables
    ...
   10 | PASS             | write policies present           | all 5 writable tables ...
-  99 | *** ALL PASS *** | summary                          | 10 checks, 0 failed
+  11 | PASS             | per-event headcount columns present | guest_events.male_count / female_count exist
+  99 | *** ALL PASS *** | summary                          | 11 checks, 0 failed
 ```
 
 On failure:
@@ -50,7 +52,7 @@ On failure:
 ```
    3 | *** FAIL ***     | no hard deletes possible         | authenticated can hard-delete: guests, activity_log
   ...
-  99 | *** VERIFY FAILED *** | summary                     | 10 checks, 2 failed
+  99 | *** VERIFY FAILED *** | summary                     | 11 checks, 2 failed
 ```
 
 ### Why 006 creates nothing
@@ -86,6 +88,7 @@ Don't read bare "Success. No rows returned" as verification — re-paste
 | 8 | three events seeded once | duplicate seed from re-running 005 |
 | 9 | views return data | 004 exists but is broken |
 | 10 | write policies exist | GRANT without policy: RLS denies every row, so the app appears to "just not save" |
+| 11 | per-event headcount columns exist | a database where 007 was never run: count changes go nowhere, and events show family numbers where overrides were intended |
 
 Then enable anonymous sign-ins: **Authentication → Providers → Anonymous → ON**.
 
@@ -99,7 +102,7 @@ already exist on Supabase and will fail there.
 |---|---|
 | `tests/00_stub.sql` | Recreates `auth` schema + `anon`/`authenticated` roles |
 | `tests/01_default_grants.sql` | Reproduces Supabase's default ALL-grants |
-| `tests/07_behaviour.sql` | Exercises the audit triggers, soft deletes, headcount math, search |
+| `tests/07_behaviour.sql` | Exercises the audit triggers, soft deletes, per-event headcount overrides, headcount math, search |
 | `tests/08_permissions.sql` | Connects as `anon` and `authenticated` and tries what must be refused |
 
 `tests/01_default_grants.sql` is not optional. Supabase pre-grants ALL on
@@ -138,12 +141,12 @@ cd supabase
 # apply stub + schema to a fresh database
 for f in tests/00_stub.sql tests/01_default_grants.sql \
          001_schema.sql 002_triggers.sql 003_rls.sql \
-         004_views.sql 005_seed.sql; do
+         004_views.sql 005_seed.sql 007_event_counts.sql; do
   podman exec -i ws-pgtest psql -U postgres -d wedding \
     -v ON_ERROR_STOP=1 -q < "$f" || break
 done
 
-# 10 assertions, raises on failure
+# 11 assertions, raises on failure
 podman exec -i ws-pgtest psql -U postgres -d wedding -q < 006_verify.sql
 
 # trigger behaviour, headcount math, search, client-role flows
@@ -171,12 +174,23 @@ That output is the expected result, not a failure.
 One `guests` row is one **family**, not one person.
 
 ```
-guests ──┬── male_count / female_count   (family size)
-         └── guest_events ── events      (attendance + card_sent per event)
+guests ──┬── male_count / female_count   (the family's numbers)
+         └── guest_events ── events      (attendance + card_sent + per-event numbers)
 ```
 
 `card_sent` lives on `guest_events`, so a family attending both baraats has
 two independent card checkboxes.
+
+### Per-event numbers
+
+`male_count` / `female_count` on `guest_events` are the numbers for **that
+event only**. `null` means "same as the family's numbers"; a value wins,
+and `0` is a recorded zero, distinct from `null`.
+
+A family can send fewer members to one event and more to another, in either
+direction: 3 men to the Baraat and 20 to the Walima, or the reverse. Nothing
+is inherited from one event to another, and no event is assumed to be the
+larger one — the app never has to know which side of the wedding it is.
 
 ### Headcount: union, not sum
 
@@ -184,7 +198,7 @@ Events overlap. A family of 5 at both baraats and the Walima appears as 5 in
 three event counts but is only 5 people. Summing `event_counts` would report
 15.
 
-- `event_counts` — per-event, feeds the filter chips
+- `event_counts` — per-event, using each family's own numbers where set
 - `guest_rollup` — each family counted **once**, feeds the top summary bar
 
 Families assigned to no event are excluded from `guest_rollup`; they are not
@@ -229,7 +243,7 @@ can.
 | Trigger | `action` values |
 |---|---|
 | `guests` | `created`, `updated`, `deleted` |
-| `guest_events` | `added_to_event`, `removed_from_event`, `card_sent`, `card_uncheck` |
+| `guest_events` | `added_to_event`, `removed_from_event`, `card_sent`, `card_uncheck`, `counts_updated` |
 | `todos` | `created`, `updated`, `assigned`, `completed`, `reopened`, `deleted` |
 
 Phone calls are deliberately **not** logged.

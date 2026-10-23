@@ -1,4 +1,4 @@
-import { listEventLinks, listEvents, listGuests } from '../db/queries';
+import { listEventLinks, listEvents, listGuests, type EventLinkRow } from '../db/queries';
 import { NO_EVENT_GROUP, type ExportFamily, type ExportGroup, type ExportModel } from './model';
 
 export async function loadExportModel(): Promise<ExportModel> {
@@ -9,12 +9,12 @@ export async function loadExportModel(): Promise<ExportModel> {
   ]);
 
   const liveEvents = new Set(events.map((event) => event.id));
-  const eventsByGuest = new Map<string, string[]>();
+  const linksByGuest = new Map<string, EventLinkRow[]>();
   for (const link of links) {
     if (!liveEvents.has(link.event_id)) continue;
-    const attending = eventsByGuest.get(link.guest_id);
-    if (attending) attending.push(link.event_id);
-    else eventsByGuest.set(link.guest_id, [link.event_id]);
+    const attending = linksByGuest.get(link.guest_id);
+    if (attending) attending.push(link);
+    else linksByGuest.set(link.guest_id, [link]);
   }
 
   const groups: ExportGroup[] = events.map((event) => ({
@@ -27,20 +27,24 @@ export async function loadExportModel(): Promise<ExportModel> {
   const unclaimed: ExportFamily[] = [];
 
   for (const guest of guests) {
-    const family: ExportFamily = {
-      id: guest.id,
-      name: guest.name,
-      men: guest.male_count,
-      women: guest.female_count,
-    };
-
-    const attending = eventsByGuest.get(guest.id) ?? [];
+    const attending = linksByGuest.get(guest.id) ?? [];
     if (attending.length === 0) {
-      unclaimed.push(family);
+      unclaimed.push({
+        id: guest.id,
+        name: guest.name,
+        men: guest.male_count,
+        women: guest.female_count,
+      });
       continue;
     }
-    for (const eventId of attending) {
-      byEvent.get(eventId)?.families.push(family);
+
+    for (const link of attending) {
+      byEvent.get(link.event_id)?.families.push({
+        id: guest.id,
+        name: guest.name,
+        men: link.male_count ?? guest.male_count,
+        women: link.female_count ?? guest.female_count,
+      });
     }
   }
 

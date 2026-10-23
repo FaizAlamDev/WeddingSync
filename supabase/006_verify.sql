@@ -8,12 +8,14 @@
 -- PostgREST, but the linter cannot tell that and warns about it. A tool
 -- reporting a security problem that does not exist is worse than no tool.
 --
--- The ten checks are computed inside one plpgsql block, stashed in a
+-- The eleven checks are computed inside one plpgsql block, stashed in a
 -- session setting for display, and raised as one error listing EVERY
--- failure. Run 1-005 first; this file changes nothing.
+-- failure. Run 1-005 (and 007 on an older database) first; this file
+-- changes nothing.
 --
 -- Reading the output: look at the `result` column, and note that failures
--- sort to the TOP. A clean run is 9 rows, all PASS, ending with no error.
+-- sort to the TOP. A clean run is 12 rows (11 checks + a summary), all
+-- PASS, ending with no error.
 
 do $$
 declare
@@ -241,7 +243,22 @@ begin
              or not exists (
             select 1 from pg_policies
             where schemaname = 'public' and tablename = t and cmd = 'UPDATE'))
-        else 'all 5 writable tables have INSERT + UPDATE policies' end)
+        else 'all 5 writable tables have INSERT + UPDATE policies' end),
+
+    -- 11. per-event headcount columns. A database from before 007 pushes
+    --     count changes that go nowhere and reads family numbers where
+    --     overrides were intended; both fail quietly at the app level.
+    jsonb_build_object(
+      'seq', 11,
+      'name', 'per-event headcount columns present',
+      'ok', (select count(*) = 2 from information_schema.columns
+             where table_schema = 'public' and table_name = 'guest_events'
+               and column_name in ('male_count', 'female_count')),
+      'detail', case when (select count(*) from information_schema.columns
+                           where table_schema = 'public' and table_name = 'guest_events'
+                             and column_name in ('male_count', 'female_count')) = 2
+        then 'guest_events.male_count / female_count exist'
+        else 'missing on guest_events -- run 007_event_counts.sql' end)
   );
 
   -- stash for the display statement below. No table is involved, and no

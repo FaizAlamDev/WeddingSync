@@ -123,6 +123,15 @@ begin
   elsif new.card_sent is distinct from old.card_sent then
     v_action  := case when new.card_sent then 'card_sent' else 'card_uncheck' end;
     v_changes := jsonb_build_object('event', v_event);
+  elsif new.male_count is distinct from old.male_count
+     or new.female_count is distinct from old.female_count then
+    -- Per-event headcount change. from/to are stored per side and may be
+    -- null on either end ("was the family's number, now set" and back).
+    v_action  := 'counts_updated';
+    v_changes := jsonb_build_object(
+      'event', v_event,
+      'men',   jsonb_build_object('from', old.male_count,   'to', new.male_count),
+      'women', jsonb_build_object('from', old.female_count, 'to', new.female_count));
   else
     return new;
   end if;

@@ -25,7 +25,10 @@ export interface SyncResult {
 
 const WRITABLE: Record<TableName, string[]> = {
   guests: ['id', 'name', 'phone', 'male_count', 'female_count', 'deleted_at'],
-  guest_events: ['id', 'guest_id', 'event_id', 'card_sent', 'card_sent_at', 'card_sent_by', 'deleted_at'],
+  guest_events: [
+    'id', 'guest_id', 'event_id', 'male_count', 'female_count',
+    'card_sent', 'card_sent_at', 'card_sent_by', 'deleted_at',
+  ],
   todos: [
     'id', 'title', 'body', 'category', 'status', 'due_date', 'assigned_to',
     'completed_at', 'completed_by', 'created_by', 'updated_by', 'deleted_at',
@@ -380,7 +383,11 @@ async function pullTable(table: TableName, cursorKey: SyncStateKey): Promise<num
 
 const LOCAL_COLUMNS: Record<string, Set<string>> = {
   guests: new Set(['id', 'name', 'phone', 'male_count', 'female_count', 'deleted_at', 'created_at', 'updated_at']),
-  guest_events: new Set(['id', 'guest_id', 'event_id', 'card_sent', 'card_sent_at', 'card_sent_by', 'deleted_at', 'created_at', 'updated_at']),
+  guest_events: new Set([
+    'id', 'guest_id', 'event_id', 'male_count', 'female_count',
+    'card_sent', 'card_sent_at', 'card_sent_by', 'deleted_at',
+    'created_at', 'updated_at',
+  ]),
   todos: new Set([
     'id', 'title', 'body', 'category', 'status', 'due_date', 'assigned_to',
     'completed_at', 'completed_by', 'created_by', 'updated_by', 'deleted_at',

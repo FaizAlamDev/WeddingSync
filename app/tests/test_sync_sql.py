@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS guest_events (
   id TEXT PRIMARY KEY NOT NULL,
   guest_id TEXT NOT NULL,
   event_id TEXT NOT NULL,
+  male_count INTEGER,
+  female_count INTEGER,
   card_sent INTEGER NOT NULL DEFAULT 0,
   card_sent_at TEXT,
   card_sent_by TEXT,
@@ -104,7 +106,10 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 WRITABLE = {
     "guests": ["id", "name", "phone", "male_count", "female_count", "deleted_at"],
-    "guest_events": ["id", "guest_id", "event_id", "card_sent", "card_sent_at", "card_sent_by", "deleted_at"],
+    "guest_events": [
+        "id", "guest_id", "event_id", "male_count", "female_count",
+        "card_sent", "card_sent_at", "card_sent_by", "deleted_at",
+    ],
     "todos": [
         "id", "title", "body", "category", "status", "due_date", "assigned_to",
         "completed_at", "completed_by", "created_by", "updated_by", "deleted_at",
@@ -139,15 +144,17 @@ def build_write_sql(table, row, now, exists=False):
     NULL column fails before DO UPDATE ever runs.
 
     `provided` is the crux: on update only the columns the caller actually
-    supplied are written, so everything else is left alone.
+    supplied are written, so everything else is left alone. A key present
+    with value None is a real write of NULL -- the app distinguishes
+    `null` from `undefined`, so "not supplied" is modelled by leaving the
+    key out of the row dict, while "clear this column" is an explicit
+    None. That distinction is what lets "Use family numbers" write NULL
+    over an old per-event count without touching the card fields.
     """
     editable = WRITABLE[table]
     stamps = TIMESTAMPS[table]
 
-    provided = [
-        c for c in editable
-        if c != "id" and c in row and row[c] is not None
-    ]
+    provided = [c for c in editable if c != "id" and c in row]
 
     # INSERT names ONLY the supplied columns so anything omitted falls back
     # to its DEFAULT. Naming every column and binding null is what caused
@@ -197,7 +204,7 @@ def run():
         "guests",
         {
             "id": "g1", "name": "Raza Family", "phone": "03001234567",
-            "male_count": 3, "female_count": 2, "deleted_at": None,
+            "male_count": 3, "female_count": 2,
         },
         NOW,
     )
@@ -217,7 +224,7 @@ def run():
         "guests",
         {
             "id": "g1", "name": "Raza Family 2", "phone": "03009998888",
-            "male_count": 3, "female_count": 2, "deleted_at": None,
+            "male_count": 3, "female_count": 2,
         },
         LATER,
         exists=True,
@@ -234,7 +241,7 @@ def run():
         {
             "id": "ge1", "guest_id": "g1", "event_id": "e1",
             "card_sent": True, "card_sent_at": LATER,
-            "card_sent_by": "Faiz", "deleted_at": None,
+            "card_sent_by": "Faiz",
         },
         NOW,
     )
@@ -249,7 +256,7 @@ def run():
         {
             "id": "ge1", "guest_id": "g1", "event_id": "e1",
             "card_sent": False, "card_sent_at": None,
-            "card_sent_by": None, "deleted_at": None,
+            "card_sent_by": None,
         },
         LATER,
         exists=True,
@@ -258,6 +265,59 @@ def run():
     row = db.execute("SELECT card_sent, created_at FROM guest_events").fetchone()
     check("untick stores 0, not null", row[0] == 0, f"-> {row[0]!r}")
     check("guest_events created_at preserved", row[1] == NOW)
+
+    print("\n3b. per-event numbers: partial write of the counts only")
+    # setEventCounts() passes ONLY male_count/female_count on an existing
+    # link. The card tick and the ids must survive untouched -- the same
+    # trap the card write exposed.
+    db.execute(*build_write_sql(
+        "guest_events",
+        {"id": "ge20", "guest_id": "g20", "event_id": "e20",
+         "card_sent": True, "card_sent_at": NOW, "card_sent_by": "Faiz"},
+        NOW,
+    ))
+    sql, params = build_write_sql(
+        "guest_events",
+        {"id": "ge20", "male_count": 1, "female_count": 0},
+        LATER, exists=True,
+    )
+    check(
+        "counts update leaves the card fields alone",
+        "card_sent = ?" not in sql and "card_sent_at = ?" not in sql,
+        f"-> {sql}",
+    )
+    check(
+        "counts update keeps guest_id/event_id out",
+        "guest_id = ?" not in sql and "event_id = ?" not in sql,
+        f"-> {sql}",
+    )
+    db.execute(sql, params)
+    row = db.execute(
+        "SELECT male_count, female_count, card_sent, guest_id, event_id, created_at "
+        "FROM guest_events WHERE id = 'ge20'"
+    ).fetchone()
+    check("per-event override stored", row[0] == 1 and row[1] == 0, f"-> {row[:2]!r}")
+    check("a recorded zero stays 0, not NULL", row[1] == 0, f"-> {row[1]!r}")
+    check("card tick survived the counts write", row[2] == 1)
+    check("guest_id and event_id preserved", row[3] == "g20" and row[4] == "e20")
+    check("created_at preserved", row[5] == NOW)
+
+    # "Use family numbers" clears the override back to NULL, which the app
+    # reads as "same as the family". It must write NULL, not 0.
+    db.execute(*build_write_sql(
+        "guest_events",
+        {"id": "ge20", "male_count": None, "female_count": None},
+        LATER, exists=True,
+    ))
+    row = db.execute(
+        "SELECT male_count, female_count, card_sent FROM guest_events WHERE id = 'ge20'"
+    ).fetchone()
+    check(
+        "clearing an override writes NULL, not 0",
+        row[0] is None and row[1] is None,
+        f"-> {row[:2]!r}",
+    )
+    check("the card still survives the clear", row[2] == 1)
 
     print("\n4. todos: insert then complete")
     sql, params = build_write_sql(
@@ -367,27 +427,30 @@ def run():
     check("event_id preserved", row[3] == "e9", f"-> {row[3]!r}")
     check("created_at still preserved", row[4] == NOW)
 
-    print("\n9. null is treated as 'not supplied' (saveTodo created_by)")
+    print("\n9. columns the caller did not supply are excluded (saveTodo's created_by)")
     db.execute(*build_write_sql(
         "todos",
         {"id": "t9", "title": "Task", "created_by": "Faiz", "updated_by": "Faiz",
          "status": "open", "deleted_at": None},
         NOW,
     ))
+    # setTodoStatus() supplies status/completed_at/completed_by/updated_by
+    # and NOTHING else: created_by is simply absent from the row dict,
+    # which is how "undefined" is modelled here.
     sql, params = build_write_sql(
         "todos",
-        {"id": "t9", "title": "Task", "created_by": None, "updated_by": "Ammi",
-         "status": "done", "deleted_at": None},
+        {"id": "t9", "status": "done", "completed_at": LATER,
+         "completed_by": "Ammi", "updated_by": "Ammi"},
         LATER,
         exists=True,
     )
     check(
-        "null created_by excluded from the UPDATE list",
+        "created_by is not in the UPDATE list",
         "created_by = ?" not in sql,
     )
     db.execute(sql, params)
     row = db.execute("SELECT created_by, updated_by FROM todos WHERE id='t9'").fetchone()
-    check("original author not wiped by null pass-through", row[0] == "Faiz", f"-> {row[0]!r}")
+    check("original author not wiped by the partial update", row[0] == "Faiz", f"-> {row[0]!r}")
     check("updater recorded", row[1] == "Ammi")
 
     print("\n10. INSERT omits unprovided columns so DEFAULTS apply")
@@ -497,6 +560,28 @@ def test_schema_in_sync():
         "guest_events local index exists",
         "idx_ge_guest" in text,
     )
+
+    # guest_events must carry the per-event count override locally too,
+    # and the migration must exist, or every install that predates this
+    # feature would fail on the first write to the new columns.
+    ge_block = re.search(
+        r"CREATE TABLE IF NOT EXISTS guest_events \((.*?)\);", text, re.S
+    )
+    check("guest_events table found in local.ts", ge_block is not None)
+    if ge_block:
+        block = ge_block.group(1)
+        check("guest_events declares male_count", "male_count" in block)
+        check("guest_events declares female_count", "female_count" in block)
+    check("local.ts has a user_version migration", "PRAGMA user_version" in text)
+    check(
+        "migration adds male_count to older databases",
+        "addColumn(database, 'guest_events', 'male_count INTEGER')" in text,
+    )
+    check(
+        "migration adds female_count to older databases",
+        "addColumn(database, 'guest_events', 'female_count INTEGER')" in text,
+    )
+
     # Every local NOT NULL timestamp column must be in TIMESTAMPS.
     for col in ("created_at", "updated_at"):
         m = re.search(rf"{col}\s+TEXT NOT NULL", text)
@@ -691,8 +776,9 @@ def test_read_queries():
     single syntax error in one takes down a whole screen.
 
     Seeded data encodes the overlap case the schema exists to handle:
-    Raza (3 men, 2 women) attends BOTH events, and Uncounted is on the
-    list but belongs to no event at all.
+    Raza (3 men, 2 women) attends BOTH events with an override of 1 man
+    and 0 women on the first, while Uncounted is on the list but belongs
+    to no event at all.
     """
     print("\n14. every read query in queries.ts executes")
 
@@ -714,12 +800,12 @@ def test_read_queries():
                " VALUES ('g1','Raza','0300',3,2,NULL,'2026-01-01','2026-02-01')")
     db.execute("INSERT INTO guests (id,name,phone,male_count,female_count,deleted_at,created_at,updated_at)"
                " VALUES ('g2','Uncounted',NULL,NULL,NULL,NULL,'2026-01-01','2026-02-01')")
-    db.execute("INSERT INTO guest_events (id,guest_id,event_id,card_sent,card_sent_at,"
-               "card_sent_by,deleted_at,created_at,updated_at)"
-               " VALUES ('ge1','g1','e1',1,'2026-02-02','Faiz',NULL,'2026-01-01','2026-02-02')")
-    db.execute("INSERT INTO guest_events (id,guest_id,event_id,card_sent,card_sent_at,"
-               "card_sent_by,deleted_at,created_at,updated_at)"
-               " VALUES ('ge2','g1','e2',0,NULL,NULL,NULL,'2026-01-01','2026-02-02')")
+    db.execute("INSERT INTO guest_events (id,guest_id,event_id,male_count,female_count,"
+               "card_sent,card_sent_at,card_sent_by,deleted_at,created_at,updated_at)"
+               " VALUES ('ge1','g1','e1',1,0,1,'2026-02-02','Faiz',NULL,'2026-01-01','2026-02-02')")
+    db.execute("INSERT INTO guest_events (id,guest_id,event_id,male_count,female_count,"
+               "card_sent,card_sent_at,card_sent_by,deleted_at,created_at,updated_at)"
+               " VALUES ('ge2','g1','e2',NULL,NULL,0,NULL,NULL,NULL,'2026-01-01','2026-02-02')")
     db.execute("INSERT INTO todos (id,title,body,category,status,due_date,assigned_to,"
                "completed_at,completed_by,created_by,updated_by,deleted_at,created_at,updated_at)"
                " VALUES ('t1','Order trays','200','Mehndi','open','2026-03-01','Ammi',"
@@ -757,9 +843,10 @@ def test_read_queries():
             print(f"       query {i} error: {e}")
         check(f"read query {i} executes", ok_flag)
 
-    print("\n15. headcount is a UNION, not a sum")
+    print("\n15. headcount is a UNION, not a sum -- and an event override wins")
     # Mirrors guest_rollup in supabase/004_views.sql. Raza attends both
-    # events; the family must be counted once, not twice.
+    # events WITH AN OVERRIDE on one of them; the rollup still counts the
+    # family once, and reads the FAMILY's numbers, not any event's.
     rollup_sql = (
         """SELECT COUNT(*) AS families,
                   CASE WHEN COUNT(g.male_count) = 0 THEN NULL
@@ -781,28 +868,53 @@ def test_read_queries():
     check("total is 5, NOT 10 (would be the sum)", rollup[3] == 5, f"-> {rollup[3]}")
     check("uncounted is 0", rollup[4] == 0, f"-> {rollup[4]}")
 
+    # Mirrors event_counts in supabase/004_views.sql: the same derived
+    # table, so the effective-number rule is exercised exactly.
     counts = db.execute(
         """SELECT e.name,
-                  COALESCE(SUM(g.male_count), 0) + COALESCE(SUM(g.female_count), 0) AS total,
-                  COALESCE(SUM(CASE WHEN ge.card_sent = 1 THEN 1 ELSE 0 END), 0) AS sent
+                  CASE WHEN COUNT(x.men) = 0 THEN NULL
+                       ELSE COALESCE(SUM(x.men), 0) END AS men,
+                  CASE WHEN COUNT(x.women) = 0 THEN NULL
+                       ELSE COALESCE(SUM(x.women), 0) END AS women,
+                  COALESCE(SUM(x.men), 0) + COALESCE(SUM(x.women), 0) AS total,
+                  COALESCE(SUM(CASE WHEN x.card_sent = 1 THEN 1 ELSE 0 END), 0) AS sent
              FROM events e
-             LEFT JOIN guest_events ge ON ge.event_id = e.id AND ge.deleted_at IS NULL
-             LEFT JOIN guests g ON g.id = ge.guest_id AND g.deleted_at IS NULL
+             LEFT JOIN (
+               SELECT ge.event_id, ge.guest_id, ge.card_sent,
+                      COALESCE(ge.male_count, g.male_count) AS men,
+                      COALESCE(ge.female_count, g.female_count) AS women
+                 FROM guest_events ge
+                 JOIN guests g ON g.id = ge.guest_id AND g.deleted_at IS NULL
+                WHERE ge.deleted_at IS NULL
+             ) x ON x.event_id = e.id
             WHERE e.deleted_at IS NULL
             GROUP BY e.id, e.name
             ORDER BY e.name"""
     ).fetchall()
     check("two event rows returned", len(counts) == 2, f"-> {len(counts)}")
-    check("Faiz Baraat headcount 5", counts[0][1] == 5, f"-> {counts[0][1]}")
-    check("Faiz Baraat 1 card sent", counts[0][2] == 1, f"-> {counts[0][2]}")
-    check("Walima headcount 5", counts[1][1] == 5, f"-> {counts[1][1]}")
-    check("Walima 0 cards sent", counts[1][2] == 0, f"-> {counts[1][2]}")
+    check(
+        "Faiz Baraat: the event's own numbers win (1 man, 0 women)",
+        counts[0][1] == 1 and counts[0][2] == 0,
+        f"-> {counts[0][1:3]!r}",
+    )
+    check("a recorded zero is 0, not NULL", counts[0][2] == 0, f"-> {counts[0][2]!r}")
+    check("Faiz Baraat total is 1", counts[0][3] == 1, f"-> {counts[0][3]}")
+    check("Faiz Baraat 1 card sent", counts[0][4] == 1, f"-> {counts[0][4]}")
+    check(
+        "Walima falls back to the family's numbers (3 men, 2 women)",
+        counts[1][1] == 3 and counts[1][2] == 2,
+        f"-> {counts[1][1:3]!r}",
+    )
+    check("Walima total is 5", counts[1][3] == 5, f"-> {counts[1][3]}")
+    check("Walima 0 cards sent", counts[1][4] == 0, f"-> {counts[1][4]}")
 
     print("\n15b. an uncounted list reports NULL, never 0")
     # "0 women" about a list whose women were never counted is the bug this
     # rule prevents: the summary bar read "0 men · 0 women" and the chips
-    # read "(0)" for events full of families.
+    # read "(0)" for events full of families. Overrides are cleared too --
+    # an override of 0 is a RECORDED zero and must not be swept up here.
     db.execute("UPDATE guests SET male_count = NULL, female_count = NULL")
+    db.execute("UPDATE guest_events SET male_count = NULL, female_count = NULL")
     none_rollup = db.execute(rollup_sql).fetchone()
     check("men is NULL, not 0", none_rollup[1] is None, f"-> {none_rollup[1]!r}")
     check("women is NULL, not 0", none_rollup[2] is None, f"-> {none_rollup[2]!r}")
@@ -814,13 +926,19 @@ def test_read_queries():
     # Mirrors event_counts in supabase/004_views.sql, same rule per event.
     event_rule = db.execute(
         """SELECT e.name,
-                  CASE WHEN COUNT(g.male_count) = 0 THEN NULL
-                       ELSE COALESCE(SUM(g.male_count), 0) END AS men,
-                  CASE WHEN COUNT(g.female_count) = 0 THEN NULL
-                       ELSE COALESCE(SUM(g.female_count), 0) END AS women
+                  CASE WHEN COUNT(x.men) = 0 THEN NULL
+                       ELSE COALESCE(SUM(x.men), 0) END AS men,
+                  CASE WHEN COUNT(x.women) = 0 THEN NULL
+                       ELSE COALESCE(SUM(x.women), 0) END AS women
              FROM events e
-             LEFT JOIN guest_events ge ON ge.event_id = e.id AND ge.deleted_at IS NULL
-             LEFT JOIN guests g ON g.id = ge.guest_id AND g.deleted_at IS NULL
+             LEFT JOIN (
+               SELECT ge.event_id, ge.guest_id,
+                      COALESCE(ge.male_count, g.male_count) AS men,
+                      COALESCE(ge.female_count, g.female_count) AS women
+                 FROM guest_events ge
+                 JOIN guests g ON g.id = ge.guest_id AND g.deleted_at IS NULL
+                WHERE ge.deleted_at IS NULL
+             ) x ON x.event_id = e.id
             WHERE e.deleted_at IS NULL
             GROUP BY e.id, e.name
             ORDER BY e.name"""
