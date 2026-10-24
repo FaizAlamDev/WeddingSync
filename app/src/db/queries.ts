@@ -92,6 +92,9 @@ export async function listEvents(): Promise<EventRow[]> {
   );
 }
 
+// A family is counted when any invited event has a positive side
+// (men/women > 0) or both sides recorded (even 0/0). A lone 0 with the
+// other side blank stays uncounted.
 export async function getRollup(): Promise<Rollup> {
   const db = await getDb();
   const row = await db.getFirstAsync<Rollup>(
@@ -106,8 +109,18 @@ export async function getRollup(): Promise<Rollup> {
        COALESCE(SUM(g.male_count), 0)
          + COALESCE(SUM(g.female_count), 0)            AS total,
        COALESCE(SUM(
-         CASE WHEN g.male_count IS NULL OR g.female_count IS NULL
-              THEN 1 ELSE 0 END), 0)                   AS uncounted
+         CASE WHEN NOT EXISTS (
+           SELECT 1
+             FROM guest_events ge2
+            WHERE ge2.guest_id = g.id
+              AND ge2.deleted_at IS NULL
+              AND (
+                COALESCE(ge2.male_count,   g.male_count)   > 0
+                OR COALESCE(ge2.female_count, g.female_count) > 0
+                OR (COALESCE(ge2.male_count,   g.male_count)   IS NOT NULL
+                    AND COALESCE(ge2.female_count, g.female_count) IS NOT NULL)
+              )
+         ) THEN 1 ELSE 0 END), 0)                   AS uncounted
      FROM guests g
      WHERE g.deleted_at IS NULL
        AND EXISTS (SELECT 1 FROM guest_events ge
@@ -118,6 +131,8 @@ export async function getRollup(): Promise<Rollup> {
   );
 }
 
+// Same counting rule as getRollup, applied to each event's effective
+// numbers (the event override when set, the family's numbers otherwise).
 export async function getEventCounts(): Promise<EventCount[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Omit<EventCount, 'name'>>(
@@ -134,7 +149,11 @@ export async function getEventCounts(): Promise<EventCount[]> {
             COALESCE(SUM(CASE WHEN x.card_sent = 1 THEN 1 ELSE 0 END), 0) AS cardsSent,
             COALESCE(SUM(
               CASE WHEN x.guest_id IS NOT NULL
-                    AND (x.men IS NULL OR x.women IS NULL)
+                    AND NOT (
+                      COALESCE(x.men, 0) > 0
+                      OR COALESCE(x.women, 0) > 0
+                      OR (x.men IS NOT NULL AND x.women IS NOT NULL)
+                    )
                    THEN 1 ELSE 0 END), 0)         AS uncounted
        FROM events e
        LEFT JOIN (

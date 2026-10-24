@@ -64,8 +64,11 @@ export default function GuestDetailScreen() {
     setGuest(g);
     setEvents(evs);
 
+    // Only events this family is actually linked to. Initialising the
+    // missing ones would render a card checkbox and the family's numbers
+    // for an event they were never invited to -- and either control would
+    // then create a link, silently inviting them.
     const next: Record<string, LinkState> = {};
-    for (const e of evs) next[e.id] = { ...EMPTY_LINK };
     for (const r of rows) {
       next[r.event_id] = {
         cardSent: r.card_sent === 1,
@@ -204,6 +207,7 @@ export default function GuestDetailScreen() {
   }
 
   const hasPhone = Boolean(dialableNumber(guest.phone));
+  const invitedEvents = events.filter((e) => links[e.id] !== undefined);
 
   return (
     <ScrollView
@@ -246,15 +250,19 @@ export default function GuestDetailScreen() {
       <Text style={styles.sectionTitle}>Invitations</Text>
       {events.length === 0 ? (
         <Text style={styles.muted}>No events yet</Text>
+      ) : invitedEvents.length === 0 ? (
+        <Text style={styles.muted}>
+          This family isn&apos;t on any event yet. Use Edit details to add one.
+        </Text>
       ) : (
-        events.map((e) => {
+        invitedEvents.map((e) => {
           const link = links[e.id];
-          const cardSent = link?.cardSent ?? false;
-          const men = link?.maleCount ?? guest.male_count;
-          const women = link?.femaleCount ?? guest.female_count;
+          if (!link) return null;
+          const cardSent = link.cardSent;
+          const men = link.maleCount ?? guest.male_count;
+          const women = link.femaleCount ?? guest.female_count;
           const ownNumbers =
-            link !== undefined &&
-            (link.maleCount !== null || link.femaleCount !== null);
+            link.maleCount !== null || link.femaleCount !== null;
           const open = editing === e.id;
 
           return (

@@ -19,6 +19,7 @@
 --   C  no-op update wrote nothing
 --   D  per-event counts, with an override of 0 women (recorded zero)
 --   E  rollup counts each family once, not once per event
+--   E2 counted needs a positive side or a complete pair, at any event
 --   F  typo-tolerant search, true and false positives
 --   G  soft-deleted rows vanish from search and counts
 --   H  card_progress
@@ -126,6 +127,108 @@ select name, men, women, total, families, uncounted, cards_sent
 
 \echo '=== E. rollup counts the family ONCE (expect 5, NOT 15) ==='
 select families, men, women, total, uncounted from guest_rollup;
+
+\echo '=== E2. counted means a positive side or a complete pair, at any event ==='
+-- Family-level numbers are blank throughout this section; the only
+-- numbers are on the event links. This isolates the per-event rule and
+-- the union's "any event is enough" behaviour.
+
+update guests set male_count = null, female_count = null
+ where name = 'Raza Family';
+-- Faiz Baraat still has its 1/0 override from section 3b: a complete pair.
+do $$
+declare v record;
+begin
+  select men, women, uncounted into v from guest_rollup;
+  if v.men is not null or v.women is not null
+     or v.uncounted is distinct from 0 then
+    raise exception 'a complete pair at one event did not count the family: %', v;
+  end if;
+
+  select uncounted into v from event_counts where name = 'Walima';
+  if v.uncounted is distinct from 1 then
+    raise exception 'an event with both sides blank was not flagged: %', v;
+  end if;
+  raise notice 'ok: numbers at one event count the family; a blank event stays flagged';
+end $$;
+
+-- Clear the last override: now no event has any numbers.
+update guest_events set male_count = null, female_count = null
+ where guest_id = (select id from guests where name = 'Raza Family')
+   and event_id = (select id from events where name = 'Faiz Baraat');
+
+do $$
+declare v record;
+begin
+  select uncounted into v from guest_rollup;
+  if v.uncounted is distinct from 1 then
+    raise exception 'family with no numbers at any event was not flagged: %', v;
+  end if;
+  raise notice 'ok: no numbers at any event means uncounted';
+end $$;
+
+-- A lone 0 says nothing about the other side.
+update guest_events set male_count = 0, female_count = null
+ where guest_id = (select id from guests where name = 'Raza Family')
+   and event_id = (select id from events where name = 'Walima');
+
+do $$
+declare v record;
+begin
+  select uncounted into v from event_counts where name = 'Walima';
+  if v.uncounted is distinct from 1 then
+    raise exception 'a lone zero was treated as counted: %', v;
+  end if;
+  select uncounted into v from guest_rollup;
+  if v.uncounted is distinct from 1 then
+    raise exception 'a lone zero counted the family at union level: %', v;
+  end if;
+  raise notice 'ok: lone 0 + blank is not counted';
+end $$;
+
+-- Both sides recorded, even 0/0, is a deliberate answer.
+update guest_events set male_count = 0, female_count = 0
+ where guest_id = (select id from guests where name = 'Raza Family')
+   and event_id = (select id from events where name = 'Walima');
+
+do $$
+declare v record;
+begin
+  select uncounted into v from event_counts where name = 'Walima';
+  if v.uncounted is distinct from 0 then
+    raise exception 'a complete 0/0 pair was treated as uncounted: %', v;
+  end if;
+  select uncounted into v from guest_rollup;
+  if v.uncounted is distinct from 0 then
+    raise exception 'a complete 0/0 pair did not count the family: %', v;
+  end if;
+  raise notice 'ok: 0/0 is a complete answer';
+end $$;
+
+-- A positive one-sided number is enough.
+update guest_events set male_count = 1, female_count = null
+ where guest_id = (select id from guests where name = 'Raza Family')
+   and event_id = (select id from events where name = 'Walima');
+
+do $$
+declare v record;
+begin
+  select uncounted into v from event_counts where name = 'Walima';
+  if v.uncounted is distinct from 0 then
+    raise exception 'a positive one-sided count was treated as uncounted: %', v;
+  end if;
+  raise notice 'ok: one positive side is enough';
+end $$;
+
+-- Restore the numbers the later sections expect.
+update guest_events set male_count = null, female_count = null
+ where guest_id = (select id from guests where name = 'Raza Family')
+   and event_id = (select id from events where name = 'Walima');
+update guest_events set male_count = 1, female_count = 0
+ where guest_id = (select id from guests where name = 'Raza Family')
+   and event_id = (select id from events where name = 'Faiz Baraat');
+update guests set male_count = 3, female_count = 2
+ where name = 'Raza Family';
 
 \echo '=== F. typo-tolerant search: "rza" -> Raza Family ==='
 select name, male_count, female_count from search_guests('rza');

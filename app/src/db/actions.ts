@@ -111,24 +111,18 @@ async function writeCard(
     eventId
   );
 
-  if (existing) {
-    await writeLocal({
-      table: 'guest_events',
-      rowId: existing.id,
-      values: {
-        card_sent: cardSent,
-        card_sent_at: cardSent ? new Date().toISOString() : null,
-        card_sent_by: cardSent ? actor : null,
-      },
-    });
-    return;
+  if (!existing) {
+    // Invitations are created only by saveFamily(). A card or a count can
+    // never be the thing that puts a family on an event.
+    throw new Error(
+      "This family isn't on that event. Add them from Edit details first."
+    );
   }
 
   await writeLocal({
     table: 'guest_events',
+    rowId: existing.id,
     values: {
-      guest_id: guestId,
-      event_id: eventId,
       card_sent: cardSent,
       card_sent_at: cardSent ? new Date().toISOString() : null,
       card_sent_by: cardSent ? actor : null,
@@ -168,24 +162,18 @@ async function writeEventCounts(
     eventId
   );
 
-  if (existing) {
-    await writeLocal({
-      table: 'guest_events',
-      rowId: existing.id,
-      values: { male_count: maleCount, female_count: femaleCount },
-    });
-    return;
+  if (!existing) {
+    // Same rule as setCard(): counts are an attribute of an invitation,
+    // never a way to create one.
+    throw new Error(
+      "This family isn't on that event. Add them from Edit details first."
+    );
   }
 
   await writeLocal({
     table: 'guest_events',
-    values: {
-      guest_id: guestId,
-      event_id: eventId,
-      card_sent: false,
-      male_count: maleCount,
-      female_count: femaleCount,
-    },
+    rowId: existing.id,
+    values: { male_count: maleCount, female_count: femaleCount },
   });
 }
 

@@ -133,7 +133,9 @@ Set for the older half of the family, deliberately:
 - no swipe gestures, no hidden affordances
 - every destructive action asks first
 - `null` counts render as "Not counted" rather than `0`, so an incomplete
-  headcount is never silently wrong
+  headcount is never silently wrong; a family is only flagged "not counted
+  yet" when no event has a positive side or a complete pair -- a lone `0`
+  with the other side blank does not count
 
 ## Permissions
 
@@ -244,12 +246,15 @@ All seven screens are implemented and the app compiles:
   phone declares where it stands before anyone starts editing
 - **Families** — union headcount bar ("—" rather than a total of 0 when
   nobody has been counted yet), per-event filter chips carrying their own
-  counts, search, call button, add-family FAB
+  counts, search, call button, add-family FAB; the warning looks across
+  events — a positive side or a complete `0/0` pair counts, a lone `0`
+  with the other side blank does not
 - **Add/edit family** — name, phone, male/female steppers, event multi-select,
   and the duplicate warning
-- **Family detail** — dialler, one checkbox per event, and per-event numbers
-  edited inline (grey while following the family's, maroon once the event has
-  its own); the trail for the family lives on the Activity tab
+- **Family detail** — dialler, one card checkbox and one numbers row per
+  event the family is actually invited to, numbers edited inline (grey while
+  following the family's, maroon once the event has its own); the trail for
+  the family lives on the Activity tab
 - **Tasks** — Open/Done tabs, category, assignee, overdue marking, and a task
   detail screen with its own trail
 - **Activity** — global feed filterable by cards / families / tasks, with

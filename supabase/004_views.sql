@@ -25,6 +25,12 @@
 -- (an override of 0 counts as recorded). Reporting 0 would claim "no
 -- women are coming" for a list whose women were simply never counted;
 -- `uncounted` is what makes the gap visible.
+--
+-- A family is counted for an event when it has a POSITIVE headcount on
+-- either side, or both sides recorded (even 0/0, a deliberate "nobody").
+-- A lone 0 with the other side blank is still uncounted: zero men says
+-- nothing about the women. This is why the rule is not simply "any
+-- non-null value".
 create or replace view public.event_counts with (security_invoker = true) as
 select
   e.id,
@@ -40,8 +46,13 @@ select
   count(x.guest_id)                                             as families,
   -- families present but not yet counted, surfaced so the summary bar can
   -- say "12 not counted" instead of quietly under-reporting
-  count(x.guest_id) filter (where x.men is null
-                             or x.women is null)                as uncounted,
+  count(x.guest_id) filter (
+    where not (
+      coalesce(x.men, 0) > 0
+      or coalesce(x.women, 0) > 0
+      or (x.men is not null and x.women is not null)
+    )
+  )                                                              as uncounted,
   count(*) filter (where x.card_sent)                           as cards_sent
 from events e
 left join (
@@ -67,7 +78,10 @@ grant select on public.event_counts to authenticated;
 -- attends. Families not assigned to any event are excluded: they are not
 -- invited anywhere yet, so they should not inflate the number.
 --
--- Same NULL rule as event_counts above.
+-- Same counting rule as event_counts above, applied across every event
+-- the family is invited to: one positive side or one complete pair
+-- anywhere is enough. The rollup's men/women/total stay family-level --
+-- only the uncounted flag looks at the per-event numbers.
 create or replace view public.guest_rollup with (security_invoker = true) as
 select
   count(*)::int                                                as families,
@@ -77,8 +91,20 @@ select
        else coalesce(sum(g.female_count), 0)::int end          as women,
   coalesce(sum(g.male_count), 0)::int
     + coalesce(sum(g.female_count), 0)::int                     as total,
-  count(*) filter (where g.male_count is null
-                    or g.female_count is null)::int             as uncounted
+  count(*) filter (
+    where not exists (
+      select 1
+        from guest_events ge2
+       where ge2.guest_id = g.id
+         and ge2.deleted_at is null
+         and (
+           coalesce(ge2.male_count,   g.male_count)   > 0
+           or coalesce(ge2.female_count, g.female_count) > 0
+           or (coalesce(ge2.male_count,   g.male_count)   is not null
+               and coalesce(ge2.female_count, g.female_count) is not null)
+         )
+    )
+  )::int                                                        as uncounted
 from guests g
 where g.deleted_at is null
   and exists (

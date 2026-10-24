@@ -854,8 +854,17 @@ def test_read_queries():
                   CASE WHEN COUNT(g.female_count) = 0 THEN NULL
                        ELSE COALESCE(SUM(g.female_count), 0) END AS women,
                   COALESCE(SUM(g.male_count), 0) + COALESCE(SUM(g.female_count), 0) AS total,
-                  COALESCE(SUM(CASE WHEN g.male_count IS NULL
-                                       OR g.female_count IS NULL THEN 1 ELSE 0 END), 0) AS uncounted
+                  COALESCE(SUM(CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM guest_events ge2
+                     WHERE ge2.guest_id = g.id
+                       AND ge2.deleted_at IS NULL
+                       AND (
+                         COALESCE(ge2.male_count, g.male_count) > 0
+                         OR COALESCE(ge2.female_count, g.female_count) > 0
+                         OR (COALESCE(ge2.male_count, g.male_count) IS NOT NULL
+                             AND COALESCE(ge2.female_count, g.female_count) IS NOT NULL)
+                       )
+                  ) THEN 1 ELSE 0 END), 0) AS uncounted
              FROM guests g
             WHERE g.deleted_at IS NULL
               AND EXISTS (SELECT 1 FROM guest_events ge
@@ -908,28 +917,21 @@ def test_read_queries():
     check("Walima total is 5", counts[1][3] == 5, f"-> {counts[1][3]}")
     check("Walima 0 cards sent", counts[1][4] == 0, f"-> {counts[1][4]}")
 
-    print("\n15b. an uncounted list reports NULL, never 0")
-    # "0 women" about a list whose women were never counted is the bug this
-    # rule prevents: the summary bar read "0 men · 0 women" and the chips
-    # read "(0)" for events full of families. Overrides are cleared too --
-    # an override of 0 is a RECORDED zero and must not be swept up here.
-    db.execute("UPDATE guests SET male_count = NULL, female_count = NULL")
-    db.execute("UPDATE guest_events SET male_count = NULL, female_count = NULL")
-    none_rollup = db.execute(rollup_sql).fetchone()
-    check("men is NULL, not 0", none_rollup[1] is None, f"-> {none_rollup[1]!r}")
-    check("women is NULL, not 0", none_rollup[2] is None, f"-> {none_rollup[2]!r}")
-    check("total is still the sum of what is known", none_rollup[3] == 0,
-          f"-> {none_rollup[3]}")
-    check("the family is reported as not counted", none_rollup[4] == 1,
-          f"-> {none_rollup[4]}")
-
+    print("\n15b. counted means a positive side or a complete pair, at any event")
     # Mirrors event_counts in supabase/004_views.sql, same rule per event.
-    event_rule = db.execute(
+    event_rule_sql = (
         """SELECT e.name,
                   CASE WHEN COUNT(x.men) = 0 THEN NULL
                        ELSE COALESCE(SUM(x.men), 0) END AS men,
                   CASE WHEN COUNT(x.women) = 0 THEN NULL
-                       ELSE COALESCE(SUM(x.women), 0) END AS women
+                       ELSE COALESCE(SUM(x.women), 0) END AS women,
+                  COALESCE(SUM(CASE WHEN x.guest_id IS NOT NULL
+                                     AND NOT (
+                                       COALESCE(x.men, 0) > 0
+                                       OR COALESCE(x.women, 0) > 0
+                                       OR (x.men IS NOT NULL AND x.women IS NOT NULL)
+                                     )
+                                    THEN 1 ELSE 0 END), 0) AS uncounted
              FROM events e
              LEFT JOIN (
                SELECT ge.event_id, ge.guest_id,
@@ -942,10 +944,66 @@ def test_read_queries():
             WHERE e.deleted_at IS NULL
             GROUP BY e.id, e.name
             ORDER BY e.name"""
-    ).fetchall()
+    )
+
+    # Family-level numbers blank. Only e1 has an override (1 man, 0 women),
+    # which is a complete pair, so the family counts even though the union
+    # totals stay family-level.
+    db.execute("UPDATE guests SET male_count = NULL, female_count = NULL")
+    rescued = db.execute(rollup_sql).fetchone()
+    check("a complete pair at one event counts the family", rescued[4] == 0,
+          f"-> {rescued[4]}")
+    check("union totals stay family-level", rescued[1] is None and rescued[2] is None,
+          f"-> {rescued[1:3]!r}")
+    rescued_events = db.execute(event_rule_sql).fetchall()
+    check("the blank event is still flagged", rescued_events[1][3] == 1,
+          f"-> {[(r[0], r[3]) for r in rescued_events]}")
+
+    # No numbers anywhere: uncounted, and the totals stay NULL rather than 0.
+    db.execute("UPDATE guest_events SET male_count = NULL, female_count = NULL")
+    none_rollup = db.execute(rollup_sql).fetchone()
+    check("no numbers at any event is uncounted", none_rollup[4] == 1,
+          f"-> {none_rollup[4]}")
+    check("men is NULL, not 0", none_rollup[1] is None, f"-> {none_rollup[1]!r}")
+    check("women is NULL, not 0", none_rollup[2] is None, f"-> {none_rollup[2]!r}")
+    check("total is still the sum of what is known", none_rollup[3] == 0,
+          f"-> {none_rollup[3]}")
+    blank_events = db.execute(event_rule_sql).fetchall()
     check("events with no counts report NULL, not 0",
-          all(r[1] is None and r[2] is None for r in event_rule),
-          f"-> {[(r[0], r[1], r[2]) for r in event_rule]}")
+          all(r[1] is None and r[2] is None for r in blank_events),
+          f"-> {[(r[0], r[1], r[2]) for r in blank_events]}")
+    check("every blank event family is uncounted",
+          all(r[3] == 1 for r in blank_events),
+          f"-> {[(r[0], r[3]) for r in blank_events]}")
+
+    # A lone 0 says nothing about the other side.
+    db.execute("UPDATE guest_events SET male_count = 0, female_count = NULL WHERE id = 'ge2'")
+    lone = db.execute(rollup_sql).fetchone()
+    check("a lone zero does not count the family", lone[4] == 1, f"-> {lone[4]}")
+    lone_events = db.execute(event_rule_sql).fetchall()
+    check("a lone zero does not count the event family", lone_events[1][3] == 1,
+          f"-> {lone_events[1][3]}")
+    check("the lone zero still sums (0, not NULL)", lone_events[1][1] == 0,
+          f"-> {lone_events[1][1]!r}")
+
+    # Both sides recorded, even 0/0, is a complete answer.
+    db.execute("UPDATE guest_events SET male_count = 0, female_count = 0 WHERE id = 'ge2'")
+    done = db.execute(rollup_sql).fetchone()
+    check("0/0 counts the family", done[4] == 0, f"-> {done[4]}")
+    done_events = db.execute(event_rule_sql).fetchall()
+    check("0/0 counts the event family", done_events[1][3] == 0,
+          f"-> {done_events[1][3]}")
+
+    # One positive side is enough.
+    db.execute("UPDATE guest_events SET male_count = 1, female_count = NULL WHERE id = 'ge2'")
+    positive = db.execute(rollup_sql).fetchone()
+    check("one positive side counts the family", positive[4] == 0,
+          f"-> {positive[4]}")
+    positive_events = db.execute(event_rule_sql).fetchall()
+    check("one positive side counts the event family", positive_events[1][3] == 0,
+          f"-> {positive_events[1][3]}")
+    check("a one-sided event reports NULL for the missing side",
+          positive_events[1][2] is None, f"-> {positive_events[1][2]!r}")
 
     db.close()
 

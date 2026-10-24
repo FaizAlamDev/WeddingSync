@@ -101,8 +101,13 @@ select
   coalesce(sum(x.men), 0)::int
     + coalesce(sum(x.women), 0)::int                            as total,
   count(x.guest_id)                                             as families,
-  count(x.guest_id) filter (where x.men is null
-                             or x.women is null)                as uncounted,
+  count(x.guest_id) filter (
+    where not (
+      coalesce(x.men, 0) > 0
+      or coalesce(x.women, 0) > 0
+      or (x.men is not null and x.women is not null)
+    )
+  )                                                              as uncounted,
   count(*) filter (where x.card_sent)                           as cards_sent
 from events e
 left join (

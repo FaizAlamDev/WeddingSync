@@ -15,6 +15,7 @@ query**) and run them one at a time, in this order:
 | `004_views.sql` | `event_counts`, `guest_rollup`, `card_progress`, `activity_feed`, `search_guests()`. |
 | `005_seed.sql` | Faiz Baraat, Moiz Baraat, Walima. Safe to re-run. |
 | `007_event_counts.sql` | Per-event headcount columns + the updated trigger and `event_counts`. Paste this on a database made before it; a no-op on fresh ones. |
+| `008_uncounted_any_event.sql` | Redefines `event_counts` and `guest_rollup`: "uncounted" now means no event has a positive side or a complete pair. Paste on a database that already ran 007. |
 | `006_verify.sql` | 11 assertions, printed as a PASS/FAIL table. **Read-only.** |
 
 Every file is **idempotent** — paste and Run as often as you like.
@@ -141,7 +142,8 @@ cd supabase
 # apply stub + schema to a fresh database
 for f in tests/00_stub.sql tests/01_default_grants.sql \
          001_schema.sql 002_triggers.sql 003_rls.sql \
-         004_views.sql 005_seed.sql 007_event_counts.sql; do
+         004_views.sql 005_seed.sql 007_event_counts.sql \
+         008_uncounted_any_event.sql; do
   podman exec -i ws-pgtest psql -U postgres -d wedding \
     -v ON_ERROR_STOP=1 -q < "$f" || break
 done
@@ -210,6 +212,17 @@ invited anywhere yet.
 from `0`. With a `default 0`, an uncounted family would be silently
 under-reported. `guest_rollup.uncounted` surfaces the gap so the UI can say
 "12 not counted" rather than showing a number you can't trust.
+
+A family is **uncounted only when no event it is invited to has a positive
+headcount or a complete pair**. "Positive" means men > 0 or women > 0.
+"Complete" means both sides recorded, even `0/0` -- a deliberate "nobody".
+A lone `0` with the other side blank is still uncounted: "0 men" says nothing
+about the women. Numbers are resolved per event first (the event's override
+when set, the family's numbers otherwise).
+
+`guest_rollup`'s `men`, `women`, and `total` stay family-level; only
+`uncounted` looks across events. A family with numbers only on an event is
+therefore not flagged, even though the union total can still be blank for it.
 
 The same rule reaches the totals: `men` and `women` in `guest_rollup` and
 `event_counts` are **NULL when not one family in scope has that side
