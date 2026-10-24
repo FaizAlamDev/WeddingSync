@@ -8,6 +8,8 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  Modal,
+  Keyboard,
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,11 +27,11 @@ import { listEvents } from '../../src/db/queries';
 import {
   saveFamily,
   findSimilarFamilies,
-  findSimilarFamiliesLocal,
   normalisePhone,
   type DuplicateHit,
 } from '../../src/db/actions';
 import { describeCounts, formatDay } from '../../src/format';
+import { normaliseName } from '../../src/similarity';
 import { colors, fontSize, spacing, radius, borderWidth } from '../../src/theme';
 
 export default function FamilyEditor() {
@@ -46,11 +48,21 @@ export default function FamilyEditor() {
   const [events, setEvents] = useState<{ id: string; name: string; event_date: string | null }[]>([]);
 
   const [duplicates, setDuplicates] = useState<DuplicateHit[]>([]);
+  const [dupQuery, setDupQuery] = useState('');
+  const [dupOpen, setDupOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(!editingId);
 
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeq = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      if (debounce.current) clearTimeout(debounce.current);
+      searchSeq.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -87,21 +99,36 @@ export default function FamilyEditor() {
     if (debounce.current) clearTimeout(debounce.current);
 
     const trimmed = next.trim();
-    if (trimmed.length < 2) {
+    if (trimmed.length < 3) {
+      searchSeq.current += 1;
       setDuplicates([]);
+      setDupQuery('');
+      setDupOpen(false);
       return;
     }
 
+    const seq = ++searchSeq.current;
     debounce.current = setTimeout(() => {
       void (async () => {
-        const hits = await findSimilarFamilies(trimmed, editingId);
-        if (hits.length > 0) {
+        try {
+          const hits = await findSimilarFamilies(trimmed, editingId);
+          if (seq !== searchSeq.current) return;
           setDuplicates(hits);
-          return;
+          setDupQuery(trimmed);
+          if (hits.length === 0) setDupOpen(false);
+        } catch {
+          if (seq === searchSeq.current) {
+            setDuplicates([]);
+            setDupQuery('');
+          }
         }
-        setDuplicates(await findSimilarFamiliesLocal(trimmed, editingId));
       })();
-    }, 400);
+    }, 500);
+  }
+
+  function openDuplicates() {
+    Keyboard.dismiss();
+    setDupOpen(true);
   }
 
   const canSave = useMemo(() => name.trim().length > 0 && !saving, [name, saving]);
@@ -133,6 +160,21 @@ export default function FamilyEditor() {
     );
   }
 
+  const trimmedName = name.trim();
+  const exactDuplicate = duplicates.find(
+    (d) => normaliseName(d.name) === normaliseName(trimmedName)
+  );
+  // Only describe matches for the text that is in the field right now.
+  // While someone is still typing, the previous answer is stale.
+  const showDuplicates = dupQuery === trimmedName && duplicates.length > 0;
+  const duplicateHint = !showDuplicates
+    ? ''
+    : exactDuplicate
+      ? `Already on the list: ${exactDuplicate.name}`
+      : duplicates.length === 1
+        ? `Possible duplicate: ${duplicates[0].name}`
+        : `${duplicates.length} possible duplicates`;
+
   if (!loaded) return <View style={styles.screen} />;
 
   return (
@@ -144,36 +186,6 @@ export default function FamilyEditor() {
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         {error ? <Banner tone="error" title="Could not save" body={error} /> : null}
 
-        {duplicates.length > 0 ? (
-          <Banner
-            tone="warn"
-            title={
-              duplicates.length === 1
-                ? 'This may already be on the list'
-                : `${duplicates.length} similar families exist`
-            }
-          />
-        ) : null}
-
-        {duplicates.length > 0 ? (
-          <View style={styles.dupList}>
-            {duplicates.map((d) => (
-              <Pressable
-                key={d.id}
-                onPress={() => router.push(`/guest/${d.id}`)}
-                accessibilityRole="button"
-                style={({ pressed }) => [styles.dupRow, pressed && styles.dupRowPressed]}
-              >
-                <Text style={styles.dupName}>{d.name}</Text>
-                <Text style={styles.dupMeta}>
-                  {describeCounts(d.male_count, d.female_count)}
-                </Text>
-                <Text style={styles.dupOpen}>Open →</Text>
-              </Pressable>
-            ))}
-          </View>
-        ) : null}
-
         <Field label="Family name">
           <TextInput
             value={name}
@@ -181,8 +193,25 @@ export default function FamilyEditor() {
             placeholderTextColor={colors.textMuted}
             style={styles.input}
             autoCorrect={false}
+            autoCapitalize="words"
             accessibilityLabel="Family name"
           />
+          {showDuplicates ? (
+            <Pressable
+              onPress={openDuplicates}
+              accessibilityRole="button"
+              accessibilityLabel={`${duplicateHint}. Review similar families`}
+              style={({ pressed }) => [
+                styles.dupHint,
+                pressed && styles.dupHintPressed,
+              ]}
+            >
+              <Text style={styles.dupHintText} numberOfLines={2}>
+                {duplicateHint}
+              </Text>
+              <Text style={styles.dupHintAction}>Review</Text>
+            </Pressable>
+          ) : null}
         </Field>
 
         <Field label="Phone number">
@@ -228,6 +257,57 @@ export default function FamilyEditor() {
           busy={saving}
         />
       </View>
+
+      <Modal
+        visible={dupOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDupOpen(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            onPress={() => setDupOpen(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close similar families"
+          />
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Similar families</Text>
+            <Text style={styles.modalBody}>
+              These names are close in spelling to “{trimmedName}”. Open one to
+              check it, or keep editing if this is a different family.
+            </Text>
+
+            <View style={styles.modalList}>
+              {duplicates.map((d) => (
+                <Pressable
+                  key={d.id}
+                  onPress={() => {
+                    setDupOpen(false);
+                    router.push(`/guest/${d.id}`);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${d.name}`}
+                  style={({ pressed }) => [
+                    styles.modalRow,
+                    pressed && styles.modalRowPressed,
+                  ]}
+                >
+                  <View style={styles.modalRowText}>
+                    <Text style={styles.modalName}>{d.name}</Text>
+                    <Text style={styles.modalMeta}>
+                      {describeCounts(d.male_count, d.female_count)}
+                    </Text>
+                  </View>
+                  <Text style={styles.modalOpen}>Open →</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <PrimaryButton label="Keep editing" onPress={() => setDupOpen(false)} />
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -239,20 +319,76 @@ const styles = StyleSheet.create({
   stepperRow: { flexDirection: 'column', gap: spacing.md },
   noEvents: { fontSize: fontSize.body, color: colors.textMuted },
 
-  dupList: { marginBottom: spacing.lg, gap: spacing.sm },
-  dupRow: {
-    minHeight: 72,
+  dupHint: {
+    minHeight: 48,
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    backgroundColor: '#FFF4E0',
+    borderRadius: radius.md,
+    borderLeftWidth: 4,
+    borderLeftColor: '#E0A800',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  dupHintPressed: { backgroundColor: '#FFE9BF' },
+  dupHintText: {
+    flex: 1,
+    fontSize: fontSize.body,
+    lineHeight: 22,
+    color: colors.text,
+  },
+  dupHintAction: {
+    fontSize: fontSize.body,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+
+  modalBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: spacing.xl,
+    backgroundColor: 'rgba(20,20,26,0.5)',
+  },
+  modalCard: {
+    backgroundColor: colors.background,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  modalTitle: {
+    fontSize: fontSize.xl,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  modalBody: {
+    fontSize: fontSize.body,
+    lineHeight: 23,
+    color: colors.textMuted,
+  },
+  modalList: { gap: spacing.sm },
+  modalRow: {
+    minHeight: 60,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
     backgroundColor: colors.surface,
     borderRadius: radius.md,
-    borderWidth: borderWidth.strong,
-    borderColor: '#E0A800',
+    borderWidth: borderWidth.hairline,
+    borderColor: colors.border,
     paddingHorizontal: spacing.md,
-    justifyContent: 'center',
+    paddingVertical: spacing.sm,
   },
-  dupRowPressed: { backgroundColor: colors.surfaceAlt },
-  dupName: { fontSize: fontSize.lg, fontWeight: '700', color: colors.text },
-  dupMeta: { fontSize: fontSize.sm, color: colors.textMuted, marginTop: 2 },
-  dupOpen: { fontSize: fontSize.sm, color: colors.primary, fontWeight: '700', marginTop: 4 },
+  modalRowPressed: { backgroundColor: colors.surfaceAlt },
+  modalRowText: { flex: 1 },
+  modalName: { fontSize: fontSize.lg, fontWeight: '700', color: colors.text },
+  modalMeta: { fontSize: fontSize.sm, color: colors.textMuted, marginTop: 2 },
+  modalOpen: {
+    fontSize: fontSize.body,
+    fontWeight: '700',
+    color: colors.primary,
+  },
 
   footer: {
     paddingHorizontal: spacing.lg,

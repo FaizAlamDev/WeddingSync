@@ -131,8 +131,9 @@ group by e.id, e.name;
 grant select on public.card_progress to authenticated;
 
 -- ─── search ─────────────────────────────────────────────────────────
--- One function serves both the search bar and the "already added?"
--- duplicate warning on the add screen.
+-- Server-side search helper. The app searches and matches possible
+-- duplicate names LOCALLY in SQLite, so this function is not called by
+-- the app; it remains for ad-hoc SQL and the SQL test suite.
 --
 -- word_similarity (not similarity) compares the query against each WORD
 -- of the name. That matters: similarity('rza','Raza Family') is only

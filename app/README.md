@@ -38,6 +38,7 @@ app/                       expo-router routes
 src/
   config.ts                env parsing + validation
   theme.ts                 colour, spacing, type scale
+  similarity.ts            local fuzzy name matching for the duplicate hint
   lib/supabase.ts          client, anonymous sign-in, profile claim
   db/
     local.ts               SQLite schema, outbox, sync cursors
@@ -70,6 +71,10 @@ mode.
 - **Timestamps** are owned by the server. A phone with a wrong clock must not
   be able to hide its changes from the rest of the family, so the client
   never writes `updated_at`.
+- **Duplicate check**: "possible duplicate" names are matched from the same
+  local rows, so the hint works offline and never waits on the network. The
+  query is debounced and only shown once typing pauses, so the form does not
+  move under the user's hands.
 
 Two cursors, for two reasons: data tables use `updated_at` with a 60-second
 overlap (two rows can share a timestamp, and re-pulling is free at this
@@ -249,8 +254,10 @@ All seven screens are implemented and the app compiles:
   counts, search, call button, add-family FAB; the warning looks across
   events — a positive side or a complete `0/0` pair counts, a lone `0`
   with the other side blank does not
-- **Add/edit family** — name, phone, male/female steppers, event multi-select,
-  and the duplicate warning
+- **Add/edit family** — name, phone, male/female steppers, event multi-select;
+  a compact "possible duplicate" hint sits under the name field (only for
+  names near in spelling) and opens a short review dialog, so the form never
+  grows a long list or scrolls while typing
 - **Family detail** — dialler, one card checkbox and one numbers row per
   event the family is actually invited to, numbers edited inline (grey while
   following the family's, maroon once the event has its own); the trail for

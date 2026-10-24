@@ -1,7 +1,7 @@
-import { supabase } from '../lib/supabase';
 import { getDb, newId, wipeLocalData } from './local';
 import { writeLocal, softDelete } from './sync';
 import { useSession } from '../state/session';
+import { rankSimilarNames } from '../similarity';
 
 export function normalisePhone(raw: string | null | undefined): string | null {
   if (!raw) return null;
@@ -250,36 +250,19 @@ export async function findSimilarFamilies(
   excludeId: string | null = null
 ): Promise<DuplicateHit[]> {
   const trimmed = name.trim();
-  if (trimmed.length < 2) return [];
+  if (trimmed.length < 3) return [];
 
-  const { data, error } = await supabase.rpc('search_guests', { q: trimmed });
-  if (error) return [];
-
-  return ((data ?? []) as DuplicateHit[]).filter(
-    (r) =>
-      r.id !== excludeId && r.name.trim().toLowerCase() !== trimmed.toLowerCase()
-  );
-}
-
-export async function findSimilarFamiliesLocal(
-  name: string,
-  excludeId: string | null = null
-): Promise<DuplicateHit[]> {
-  const trimmed = name.trim();
-  if (trimmed.length < 2) return [];
   const db = await getDb();
-  return db.getAllAsync<DuplicateHit>(
+  const rows = await db.getAllAsync<DuplicateHit>(
     `SELECT id, name, male_count, female_count
        FROM guests
       WHERE deleted_at IS NULL
         AND id <> COALESCE(?, '')
-        AND name LIKE ?
-        AND lower(name) <> lower(?)
-      ORDER BY name LIMIT 5`,
-    excludeId,
-    `%${trimmed}%`,
-    trimmed
+      ORDER BY name`,
+    excludeId
   );
+
+  return rankSimilarNames(trimmed, rows);
 }
 
 export { wipeLocalData };

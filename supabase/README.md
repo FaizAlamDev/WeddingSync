@@ -265,10 +265,16 @@ A no-op update writes nothing. Without that guard the Activity tab would fill
 with meaningless `updated` rows on every sync pull, since the client
 re-upserts rows while pulling.
 
-## Search
+## Search and duplicate matching
 
-`search_guests(q)` backs both the search bar and the "already added?" warning
-on the add screen.
+The app searches **local SQLite**, and matches possible duplicate names there
+too (normalised edit distance plus prefix/token matching, best three results).
+Nothing waits on a network round-trip, and the duplicate hint works offline.
+It is debounced, requires at least three characters, and only appears once
+typing pauses.
+
+`search_guests(q)` is kept on the server for ad-hoc SQL and the test suite;
+the app does not call it.
 
 It uses `word_similarity(q, name) > 0.25`, not `similarity()`. Plain
 similarity diffs the query against the *whole* string, so
